@@ -1,9 +1,10 @@
 # Minimal ChordMini Backend - Chord Recognition + Beat Detection only
-# Uses PyTorch CPU-only for Chord-CNN-LSTM, madmom for beat detection
-
 FROM python:3.10-slim
 
 WORKDIR /app
+
+# Cache-buster
+ARG CACHEBUST=3
 
 # Install system deps + build tools for madmom
 RUN apt-get update && apt-get install -y \
@@ -20,7 +21,7 @@ RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/wh
 # Install madmom (beat detection)
 RUN pip install --no-cache-dir git+https://github.com/CPJKU/madmom
 
-# Install remaining deps
+# Install remaining deps - cache bust ensures fresh copy
 COPY requirements-minimal.txt .
 RUN pip install --no-cache-dir -r requirements-minimal.txt
 
