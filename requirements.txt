@@ -23,6 +23,12 @@ soxr==0.5.0.post1
 # Beat detection
 # madmom installed from git separately in Dockerfile
 
+# Chord-CNN-LSTM model dependencies
+joblib>=0.13.2
+pydub>=0.23.1
+h5py>=2.9.0
+pretty_midi>=0.2.9
+
 # Utilities
 tqdm==4.67.1
 decorator==5.2.1

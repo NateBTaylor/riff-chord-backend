@@ -64,9 +64,8 @@ class ChordCNNLSTMDetectorService:
                 return True
             except ImportError as e:
                 log_error(f"Chord-CNN-LSTM import failed: {e}")
-                # TEMPORARY: Return True for testing response format
-                self._available = True
-                return True
+                self._available = False
+                return False
             finally:
                 os.chdir(original_dir)
 
@@ -141,15 +140,16 @@ class ChordCNNLSTMDetectorService:
                 # Parse the lab file
                 chord_data = self._parse_lab_file(temp_lab_path)
 
-            except ImportError:
-                # TEMPORARY: Create mock data for testing response format
-                log_info("Using mock chord data for testing response format")
-                chord_data = [
-                    {"start": 0.0, "end": 2.0, "chord": "C:maj", "confidence": 1.0},
-                    {"start": 2.0, "end": 4.0, "chord": "F:maj", "confidence": 1.0},
-                    {"start": 4.0, "end": 6.0, "chord": "G:maj", "confidence": 1.0},
-                    {"start": 6.0, "end": 8.0, "chord": "C:maj", "confidence": 1.0}
-                ]
+            except ImportError as e:
+                log_error(f"Chord-CNN-LSTM import failed during recognition: {e}")
+                return {
+                    "success": False,
+                    "error": f"Chord-CNN-LSTM import failed: {e}",
+                    "model_used": "chord-cnn-lstm",
+                    "model_name": "Chord-CNN-LSTM",
+                    "chord_dict": chord_dict,
+                    "processing_time": time.time() - start_time
+                }
             
             # Calculate duration (using "end" field to match frontend expectations)
             duration = chord_data[-1]["end"] if chord_data else 0.0
