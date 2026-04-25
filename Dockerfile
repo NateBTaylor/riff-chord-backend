@@ -1,3 +1,4 @@
+# Build: 1777092555
 # Minimal ChordMini Backend - Chord Recognition + Beat Detection only
 # Stripped of PyTorch, Spleeter, and other unneeded deps to fit Railway free tier
 
