@@ -1,6 +1,5 @@
-# Build: 1777092555
 # Minimal ChordMini Backend - Chord Recognition + Beat Detection only
-# Stripped of PyTorch, Spleeter, and other unneeded deps to fit Railway free tier
+# Uses PyTorch CPU-only for Chord-CNN-LSTM, madmom for beat detection
 
 FROM python:3.10-slim
 
@@ -11,11 +10,17 @@ RUN apt-get update && apt-get install -y \
     curl build-essential libsndfile1-dev libsndfile1 ffmpeg git pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python deps
+# Install base Python deps
 RUN pip install --no-cache-dir --upgrade pip "setuptools==79.0.1" wheel
 RUN pip install --no-cache-dir Cython>=0.29.0 numpy==1.26.4
+
+# Install PyTorch CPU-only (~200MB vs ~800MB for full)
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+
+# Install madmom (beat detection)
 RUN pip install --no-cache-dir git+https://github.com/CPJKU/madmom
 
+# Install remaining deps
 COPY requirements-minimal.txt .
 RUN pip install --no-cache-dir -r requirements-minimal.txt
 
