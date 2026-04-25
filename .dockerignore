@@ -1,0 +1,75 @@
+# Full Backend Deployment - Simplified exclusion approach
+
+# Exclude only unnecessary files
+myenv/
+
+# Virtual environments
+venv/
+env/
+.env
+.venv
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+
+# Development files
+.git/
+.gitignore
+README.md
+*.md
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Test directories (but keep individual test files like test_btc.py)
+tests/
+
+# Temporary files
+*.tmp
+*.temp
+temp/
+tmp/
+
+# Large data files (keep only essential models)
+pretrained_models/
+output_with_clicks.wav
+beats_with_positions.txt
+downbeats_measures.txt
+
+# DEPLOYMENT UPDATE: Exclude BTC models (no longer used)
+models/ChordMini/
+checkpoint.bin
+
+# Exclude large Beat-Transformer model files but keep the Python code and essential checkpoint
+# models/Beat-Transformer/checkpoint - KEEP: contains only fold_4_trf_param.pt (35MB)
+models/Beat-Transformer/save
+models/Beat-Transformer/data
+models/Beat-Transformer/test_audio
+models/Beat-Transformer/__pycache__
+
+# Explicitly include essential model files
+!models/Beat-Transformer/checkpoint/
+!models/Beat-Transformer/checkpoint/fold_4_trf_param.pt
+
+# Development scripts
+setup.sh
+setup_beat_transformer.sh
+
+# Documentation
+instructions_*.md
