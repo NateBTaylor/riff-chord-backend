@@ -46,13 +46,6 @@ def service_status():
     except Exception as e:
         status["demucs"] = {"available": False, "error": str(e)}
 
-    # Check faster-whisper (lyrics)
-    try:
-        from faster_whisper import WhisperModel
-        status["faster_whisper"] = {"available": True}
-    except Exception as e:
-        status["faster_whisper"] = {"available": False, "error": str(e)}
-
     # Check services from app extensions
     from flask import current_app
     services = current_app.extensions.get('services', {})

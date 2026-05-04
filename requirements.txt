@@ -32,9 +32,6 @@ pydub>=0.23.1
 h5py>=2.9.0
 pretty_midi>=0.2.9
 
-# Lyrics transcription (runs on vocals stem from Spleeter)
-faster-whisper==1.2.1
-
 # Utilities
 tqdm==4.67.1
 decorator==5.2.1
