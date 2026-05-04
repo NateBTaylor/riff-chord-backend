@@ -10,7 +10,6 @@ import os
 import time
 import tempfile
 import traceback
-from concurrent.futures import ThreadPoolExecutor
 from flask import Blueprint, request, jsonify, current_app
 from extensions import limiter
 from config import get_config
@@ -107,57 +106,46 @@ def analyze():
         chord_audio = accompaniment_path or temp_file_path
         lyrics_audio = vocals_path or temp_file_path
 
-        # --- Phase 1: Chords + beats IN PARALLEL ---
-        # These two are lightweight enough to run concurrently.
-        chord_result = None
-        beat_result = None
-        chord_error = None
-        beat_error = None
+        # --- Run chords, beats, lyrics SEQUENTIALLY ---
+        # Railway's memory is too constrained for parallel ML model inference.
+        # Sequential execution ensures only one model is under heavy load at a time.
 
-        def run_chords():
-            return chord_service.recognize_chords(
+        # Step 1: Beat detection
+        log_info("Step 1/3: Beat detection")
+        beat_result = None
+        try:
+            beat_result = beat_service.detect_beats(
+                file_path=temp_file_path,
+                detector=detector,
+                force=False,
+            )
+        except Exception as e:
+            log_error(f"Beat detection failed: {e}")
+
+        if not beat_result or not beat_result.get('success'):
+            error = beat_result.get('error') if beat_result else 'Unknown'
+            return jsonify({"success": False, "error": f"Beat detection failed: {error}"}), 500
+
+        # Step 2: Chord recognition
+        log_info("Step 2/3: Chord recognition")
+        chord_result = None
+        try:
+            chord_result = chord_service.recognize_chords(
                 file_path=chord_audio,
                 detector=model,
                 chord_dict=chord_dict,
                 force=False,
                 use_spleeter=False,
             )
+        except Exception as e:
+            log_error(f"Chord recognition failed: {e}")
 
-        def run_beats():
-            return beat_service.detect_beats(
-                file_path=temp_file_path,
-                detector=detector,
-                force=False,
-            )
-
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            chord_future = executor.submit(run_chords)
-            beat_future = executor.submit(run_beats)
-
-            try:
-                chord_result = chord_future.result()
-            except Exception as e:
-                chord_error = str(e)
-                log_error(f"Chord recognition thread failed: {e}")
-
-            try:
-                beat_result = beat_future.result()
-            except Exception as e:
-                beat_error = str(e)
-                log_error(f"Beat detection thread failed: {e}")
-
-        if chord_error or not chord_result or not chord_result.get('success'):
-            error = chord_error or (chord_result.get('error') if chord_result else 'Unknown')
+        if not chord_result or not chord_result.get('success'):
+            error = chord_result.get('error') if chord_result else 'Unknown'
             return jsonify({"success": False, "error": f"Chord recognition failed: {error}"}), 500
 
-        if beat_error or not beat_result or not beat_result.get('success'):
-            error = beat_error or (beat_result.get('error') if beat_result else 'Unknown')
-            return jsonify({"success": False, "error": f"Beat detection failed: {error}"}), 500
-
-        # --- Phase 2: Lyrics AFTER chords+beats ---
-        # Running all 3 ML models simultaneously OOMs on Railway.
-        # Lyrics runs sequentially after the other models have finished inference
-        # (their memory is still allocated but not under active load).
+        # Step 3: Lyrics transcription
+        log_info("Step 3/3: Lyrics transcription")
         lyrics_words = []
         if lyrics_service and lyrics_service.is_available():
             try:
