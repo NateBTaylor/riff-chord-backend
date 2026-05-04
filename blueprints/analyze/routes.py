@@ -1,11 +1,9 @@
 """
 Combined analysis endpoint for Riff iOS app.
 
-Runs Spleeter stem separation first, then chord recognition, beat detection,
-and lyrics transcription all in parallel on the appropriate stems:
-  - Accompaniment stem → chord recognition (no vocal interference)
-  - Vocals stem → lyrics transcription (clean vocals, no music)
-  - Full mix → beat detection (needs drums for rhythm tracking)
+Runs chord recognition + beat detection in parallel, then lyrics transcription
+sequentially. Running all three ML models simultaneously exceeds Railway's
+memory limit, so lyrics runs after chords+beats complete.
 """
 
 import os
@@ -29,19 +27,16 @@ config = get_config()
 @limiter.limit(config.get_rate_limit('heavy_processing'))
 def analyze():
     """
-    Combined analysis: Spleeter separation + chord recognition + beat detection + lyrics.
+    Combined analysis: chord recognition + beat detection + lyrics transcription.
 
-    Spleeter runs first to separate vocals and accompaniment, then three tasks
-    run in parallel on the appropriate audio:
-    - Chords: accompaniment stem (no vocals/drums polluting chroma)
-    - Beats: full mix (drums needed for rhythm tracking)
-    - Lyrics: vocals stem (clean vocals for accurate transcription)
+    Phase 1: Chords + beats run in parallel (both are lightweight).
+    Phase 2: Lyrics runs after phase 1 completes (avoids OOM from 3 concurrent models).
 
     Parameters:
     - file: Audio file (multipart/form-data)
     - model: Chord model (default 'chord-cnn-lstm')
     - detector: Beat detector (default 'madmom')
-    - use_spleeter: 'true'/'false' (default 'true')
+    - use_spleeter: 'true'/'false' (default 'false' — Demucs too heavy for Railway CPU)
     - chord_dict: Chord dictionary (optional)
 
     Returns:
@@ -60,7 +55,7 @@ def analyze():
         # Parse parameters
         model = request.form.get('model', 'chord-cnn-lstm').lower()
         detector = request.form.get('detector', 'madmom').lower()
-        use_spleeter_param = request.form.get('use_spleeter', 'true').lower()
+        use_spleeter_param = request.form.get('use_spleeter', 'false').lower()
         use_spleeter = use_spleeter_param == 'true'
         chord_dict = request.form.get('chord_dict', None)
 
@@ -82,9 +77,9 @@ def analyze():
         if not beat_service:
             return jsonify({"error": "Beat detection service unavailable"}), 503
 
-        # --- Step 1: Run Demucs stem separation ---
-        # Produces vocals + accompaniment (drums+bass+other combined).
-        # Do this first so we can distribute stems to parallel tasks.
+        # --- Optional: Demucs stem separation ---
+        # Disabled by default — htdemucs needs ~6GB RAM on CPU which causes OOM on Railway.
+        # When enabled (use_spleeter=true), chords run on accompaniment, lyrics on vocals.
         accompaniment_path = None
         vocals_path = None
         spleeter_info = {"used": False}
@@ -103,28 +98,23 @@ def analyze():
                     "model": spleeter_result.get("model_used", "htdemucs"),
                     "processing_time": round(spleeter_time, 1),
                 }
-                log_info(f"Demucs complete in {spleeter_time:.1f}s — "
-                         f"accompaniment: {accompaniment_path}, vocals: {vocals_path}")
+                log_info(f"Demucs complete in {spleeter_time:.1f}s")
             else:
                 log_error(f"Demucs failed: {spleeter_result.get('error')}. "
                           f"Proceeding without separation.")
                 spleeter_info = {"used": False, "error": spleeter_result.get("error")}
 
-        # --- Step 2: Run chords, beats, and lyrics IN PARALLEL ---
-        # Each uses the optimal audio source.
         chord_audio = accompaniment_path or temp_file_path
-        # Prefer vocals stem for lyrics (clean vocals); fall back to full mix
         lyrics_audio = vocals_path or temp_file_path
 
+        # --- Phase 1: Chords + beats IN PARALLEL ---
+        # These two are lightweight enough to run concurrently.
         chord_result = None
         beat_result = None
-        lyrics_result = None
         chord_error = None
         beat_error = None
-        lyrics_error = None
 
         def run_chords():
-            # Pass use_spleeter=False since we already separated above
             return chord_service.recognize_chords(
                 file_path=chord_audio,
                 detector=model,
@@ -140,15 +130,9 @@ def analyze():
                 force=False,
             )
 
-        def run_lyrics():
-            if not lyrics_service or not lyrics_service.is_available():
-                return {"success": False, "error": "Lyrics service unavailable", "lyrics": []}
-            return lyrics_service.transcribe(audio_path=lyrics_audio)
-
-        with ThreadPoolExecutor(max_workers=3) as executor:
+        with ThreadPoolExecutor(max_workers=2) as executor:
             chord_future = executor.submit(run_chords)
             beat_future = executor.submit(run_beats)
-            lyrics_future = executor.submit(run_lyrics)
 
             try:
                 chord_result = chord_future.result()
@@ -162,13 +146,6 @@ def analyze():
                 beat_error = str(e)
                 log_error(f"Beat detection thread failed: {e}")
 
-            try:
-                lyrics_result = lyrics_future.result()
-            except Exception as e:
-                lyrics_error = str(e)
-                log_error(f"Lyrics transcription thread failed: {e}")
-
-        # --- Validate required results (chords + beats) ---
         if chord_error or not chord_result or not chord_result.get('success'):
             error = chord_error or (chord_result.get('error') if chord_result else 'Unknown')
             return jsonify({"success": False, "error": f"Chord recognition failed: {error}"}), 500
@@ -177,14 +154,24 @@ def analyze():
             error = beat_error or (beat_result.get('error') if beat_result else 'Unknown')
             return jsonify({"success": False, "error": f"Beat detection failed: {error}"}), 500
 
-        # Lyrics are optional — don't fail the whole request if they fail
+        # --- Phase 2: Lyrics AFTER chords+beats ---
+        # Running all 3 ML models simultaneously OOMs on Railway.
+        # Lyrics runs sequentially after the other models have finished inference
+        # (their memory is still allocated but not under active load).
         lyrics_words = []
-        if lyrics_result and lyrics_result.get("success"):
-            lyrics_words = lyrics_result.get("lyrics", [])
-            log_info(f"Lyrics transcription: {len(lyrics_words)} words")
+        if lyrics_service and lyrics_service.is_available():
+            try:
+                lyrics_result = lyrics_service.transcribe(audio_path=lyrics_audio)
+                if lyrics_result and lyrics_result.get("success"):
+                    lyrics_words = lyrics_result.get("lyrics", [])
+                    log_info(f"Lyrics transcription: {len(lyrics_words)} words")
+                else:
+                    lyrics_err = lyrics_result.get("error") if lyrics_result else "Unknown"
+                    log_info(f"Lyrics transcription failed: {lyrics_err}")
+            except Exception as e:
+                log_error(f"Lyrics transcription error: {e}")
         else:
-            lyrics_err = lyrics_error or (lyrics_result.get("error") if lyrics_result else "N/A")
-            log_info(f"Lyrics transcription skipped/failed: {lyrics_err}")
+            log_info("Lyrics transcription service not available, skipping")
 
         processing_time = time.time() - start_time
 
