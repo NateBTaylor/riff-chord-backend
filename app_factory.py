@@ -144,8 +144,21 @@ def init_services(app: Flask, config) -> None:
         log_info("Lyrics service initialized")
     except Exception as e:
         log_info(f"Failed to initialize lyrics service: {e}")
-        # Create a dummy service that returns errors
         services['lyrics'] = None
+
+    # Initialize lyrics transcription service (server-side Whisper)
+    try:
+        from services.audio.lyrics_transcription_service import LyricsTranscriptionService
+        lyrics_transcription = LyricsTranscriptionService(model_size="tiny")
+        if lyrics_transcription.is_available():
+            services['lyrics_transcription'] = lyrics_transcription
+            log_info("Lyrics transcription service initialized (tiny model)")
+        else:
+            services['lyrics_transcription'] = None
+            log_info("Lyrics transcription service unavailable (faster-whisper not installed)")
+    except Exception as e:
+        log_info(f"Failed to initialize lyrics transcription service: {e}")
+        services['lyrics_transcription'] = None
 
     # Initialize SongFormer service
     try:

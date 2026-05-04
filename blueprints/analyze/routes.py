@@ -1,9 +1,8 @@
 """
 Combined analysis endpoint for Riff iOS app.
 
-Runs beat detection then chord recognition sequentially. Only two models are
-loaded at once (madmom + chord-cnn-lstm), which fits within Railway's memory
-limit. Lyrics are handled on-device by WhisperKit on iOS.
+Runs beat detection, chord recognition, then lyrics transcription sequentially.
+Models are loaded/unloaded between steps to stay within Railway's memory budget.
 """
 
 import gc
@@ -27,10 +26,9 @@ config = get_config()
 @limiter.limit(config.get_rate_limit('heavy_processing'))
 def analyze():
     """
-    Combined analysis: beat detection + chord recognition.
+    Combined analysis: beat detection + chord recognition + lyrics transcription.
 
     Runs sequentially to stay within Railway's memory budget.
-    Lyrics transcription is handled on-device (WhisperKit) by the iOS app.
 
     Parameters:
     - file: Audio file (multipart/form-data)
@@ -39,7 +37,7 @@ def analyze():
     - chord_dict: Chord dictionary (optional)
 
     Returns:
-    - JSON with chords, beats, bpm, duration, and metadata
+    - JSON with chords, beats, bpm, duration, lyrics, and metadata
     """
     temp_file_path = None
     start_time = time.time()
@@ -109,6 +107,29 @@ def analyze():
             error = chord_result.get('error') if chord_result else 'Unknown'
             return jsonify({"success": False, "error": f"Chord recognition failed: {error}"}), 500
 
+        # Free chord model memory before lyrics
+        gc.collect()
+
+        # --- Step 3: Lyrics transcription (optional) ---
+        lyrics_words = []
+        lyrics_service = current_app.extensions['services'].get('lyrics_transcription')
+        if lyrics_service and temp_file_path:
+            log_info("Step 3/3: Lyrics transcription")
+            try:
+                lyrics_result = lyrics_service.transcribe(temp_file_path)
+                if lyrics_result.get('success') and lyrics_result.get('lyrics'):
+                    lyrics_words = lyrics_result['lyrics']
+                    log_info(f"Transcribed {len(lyrics_words)} words in "
+                             f"{lyrics_result.get('processing_time', 0)}s")
+                else:
+                    log_info(f"Lyrics transcription returned no words: "
+                             f"{lyrics_result.get('error', 'empty')}")
+            except Exception as e:
+                log_error(f"Lyrics transcription failed: {e}")
+            gc.collect()
+        else:
+            log_info("Lyrics transcription skipped (service unavailable)")
+
         processing_time = time.time() - start_time
 
         response = {
@@ -121,13 +142,14 @@ def analyze():
             "model_used": chord_result.get("model_used", model),
             "chord_dict": chord_result.get("chord_dict", "submission"),
             "used_spleeter": False,
-            "lyrics": [],
-            "total_words": 0,
+            "lyrics": lyrics_words,
+            "total_words": len(lyrics_words),
             "processing_time": round(processing_time, 1),
         }
 
         log_info(f"Combined analysis complete: {response['total_chords']} chords, "
                  f"{len(response['beats'])} beats, BPM {response['bpm']}, "
+                 f"{response['total_words']} lyrics words, "
                  f"{response['processing_time']}s")
 
         return jsonify(response)
