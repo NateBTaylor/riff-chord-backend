@@ -20,6 +20,9 @@ audioread>=2.1.9
 resampy==0.4.3
 soxr==0.5.0.post1
 
+# Stem separation (Demucs — uses PyTorch, already installed in Dockerfile)
+demucs>=4.0.0
+
 # Beat detection
 # madmom installed from git separately in Dockerfile
 

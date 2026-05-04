@@ -233,19 +233,19 @@ class ChordRecognitionService:
             spleeter_info = None
             
             if use_spleeter and self.spleeter_service.is_available():
-                log_info("Using Spleeter for audio separation")
+                log_info("Using Demucs for audio separation")
                 spleeter_result = self.spleeter_service.extract_vocals(file_path)
                 if spleeter_result.get("success"):
                     # Use the accompaniment track for chord recognition (no vocals/drums)
                     audio_file_to_process = spleeter_result.get("accompaniment_path", file_path)
                     spleeter_info = {
                         "used": True,
-                        "model": "2stems",
+                        "model": spleeter_result.get("model_used", "htdemucs"),
                         "processing_time": spleeter_result.get("processing_time", 0.0)
                     }
                     log_info(f"Using separated accompaniment: {audio_file_to_process}")
                 else:
-                    log_error(f"Spleeter separation failed: {spleeter_result.get('error')}")
+                    log_error(f"Stem separation failed: {spleeter_result.get('error')}")
                     spleeter_info = {"used": False, "error": spleeter_result.get("error")}
             
             # Run chord recognition

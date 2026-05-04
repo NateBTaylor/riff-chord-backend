@@ -82,14 +82,15 @@ def analyze():
         if not beat_service:
             return jsonify({"error": "Beat detection service unavailable"}), 503
 
-        # --- Step 1: Run Spleeter to get stems ---
+        # --- Step 1: Run Demucs stem separation ---
+        # Produces vocals + accompaniment (drums+bass+other combined).
         # Do this first so we can distribute stems to parallel tasks.
         accompaniment_path = None
         vocals_path = None
         spleeter_info = {"used": False}
 
         if use_spleeter and chord_service.spleeter_service.is_available():
-            log_info("Running Spleeter 2-stem separation (44.1kHz)")
+            log_info("Running Demucs htdemucs stem separation")
             spleeter_start = time.time()
             spleeter_result = chord_service.spleeter_service.extract_vocals(temp_file_path)
 
@@ -99,13 +100,13 @@ def analyze():
                 spleeter_time = time.time() - spleeter_start
                 spleeter_info = {
                     "used": True,
-                    "model": "2stems",
+                    "model": spleeter_result.get("model_used", "htdemucs"),
                     "processing_time": round(spleeter_time, 1),
                 }
-                log_info(f"Spleeter complete in {spleeter_time:.1f}s — "
+                log_info(f"Demucs complete in {spleeter_time:.1f}s — "
                          f"accompaniment: {accompaniment_path}, vocals: {vocals_path}")
             else:
-                log_error(f"Spleeter failed: {spleeter_result.get('error')}. "
+                log_error(f"Demucs failed: {spleeter_result.get('error')}. "
                           f"Proceeding without separation.")
                 spleeter_info = {"used": False, "error": spleeter_result.get("error")}
 
@@ -227,11 +228,11 @@ def analyze():
             except Exception as e:
                 log_error(f"Failed to clean up temp file {temp_file_path}: {e}")
 
-        # Clean up Spleeter stems
+        # Clean up Demucs stems
         if spleeter_result and spleeter_result.get("success"):
             try:
                 chord_service = current_app.extensions['services']['chord_recognition']
                 chord_service.spleeter_service.cleanup_stems(spleeter_result)
-                log_debug("Cleaned up Spleeter stems")
+                log_debug("Cleaned up Demucs stems")
             except Exception as e:
-                log_error(f"Failed to clean up Spleeter stems: {e}")
+                log_error(f"Failed to clean up Demucs stems: {e}")
