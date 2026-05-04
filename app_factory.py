@@ -156,7 +156,14 @@ def init_services(app: Flask, config) -> None:
         log_info(f"Failed to initialize SongFormer service: {e}")
         services['songformer'] = None
 
-
+    # Initialize lyrics transcription service (faster-whisper on vocals stem)
+    try:
+        from services.audio.lyrics_transcription_service import LyricsTranscriptionService
+        services['lyrics_transcription'] = LyricsTranscriptionService(model_size="small")
+        log_info("Lyrics transcription service initialized")
+    except Exception as e:
+        log_info(f"Failed to initialize lyrics transcription service: {e}")
+        services['lyrics_transcription'] = None
 
     # Store services in app extensions
     app.extensions['services'] = services

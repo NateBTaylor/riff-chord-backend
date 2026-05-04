@@ -240,7 +240,7 @@ class ChordRecognitionService:
                     audio_file_to_process = spleeter_result.get("accompaniment_path", file_path)
                     spleeter_info = {
                         "used": True,
-                        "model": "2stems-16kHz",
+                        "model": "2stems",
                         "processing_time": spleeter_result.get("processing_time", 0.0)
                     }
                     log_info(f"Using separated accompaniment: {audio_file_to_process}")

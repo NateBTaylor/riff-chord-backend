@@ -45,12 +45,12 @@ class SpleeterService:
             self._available = False
             return False
     
-    def get_separator(self, model_name: str = '2stems-16kHz') -> Any:
+    def get_separator(self, model_name: str = '2stems') -> Any:
         """
         Get or create a Spleeter separator instance.
-        
+
         Args:
-            model_name: Spleeter model to use ('2stems-16kHz', '4stems-16kHz', '5stems-16kHz')
+            model_name: Spleeter model to use ('2stems', '4stems', '5stems', or 16kHz variants)
             
         Returns:
             Spleeter Separator instance
@@ -68,7 +68,7 @@ class SpleeterService:
             log_error(f"Failed to create Spleeter separator: {e}")
             raise
     
-    def separate_audio(self, audio_path: str, model_name: str = '2stems-16kHz', 
+    def separate_audio(self, audio_path: str, model_name: str = '2stems',
                       output_dir: Optional[str] = None) -> Dict[str, Any]:
         """
         Separate audio into stems using Spleeter.
@@ -188,7 +188,7 @@ class SpleeterService:
         Returns:
             Dict containing extraction results with vocals and accompaniment paths
         """
-        result = self.separate_audio(audio_path, '2stems-16kHz', output_dir)
+        result = self.separate_audio(audio_path, '2stems', output_dir)
         
         if result.get("success"):
             stems = result.get("stems", {})
@@ -208,7 +208,7 @@ class SpleeterService:
         Returns:
             Dict containing extraction results with individual instrument paths
         """
-        result = self.separate_audio(audio_path, '4stems-16kHz', output_dir)
+        result = self.separate_audio(audio_path, '4stems', output_dir)
         
         if result.get("success"):
             stems = result.get("stems", {})
@@ -257,7 +257,7 @@ class SpleeterService:
         if not self.is_available():
             return []
         
-        return ['2stems-16kHz', '4stems-16kHz', '5stems-16kHz']
+        return ['2stems', '4stems', '5stems']
     
     def get_model_info(self) -> Dict[str, Any]:
         """
@@ -269,16 +269,16 @@ class SpleeterService:
         return {
             "available": self.is_available(),
             "models": {
-                "2stems-16kHz": {
-                    "description": "Separates vocals and accompaniment",
+                "2stems": {
+                    "description": "Separates vocals and accompaniment (44.1kHz)",
                     "stems": ["vocals", "accompaniment"]
                 },
-                "4stems-16kHz": {
-                    "description": "Separates vocals, drums, bass, and other",
+                "4stems": {
+                    "description": "Separates vocals, drums, bass, and other (44.1kHz)",
                     "stems": ["vocals", "drums", "bass", "other"]
                 },
-                "5stems-16kHz": {
-                    "description": "Separates vocals, drums, bass, piano, and other",
+                "5stems": {
+                    "description": "Separates vocals, drums, bass, piano, and other (44.1kHz)",
                     "stems": ["vocals", "drums", "bass", "piano", "other"]
                 }
             }
