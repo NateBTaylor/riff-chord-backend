@@ -37,15 +37,6 @@ def service_status():
     """Check availability of all services with error details."""
     status = {}
 
-    # Check demucs (stem separation)
-    try:
-        import torch
-        import torchaudio
-        from demucs.pretrained import get_model
-        status["demucs"] = {"available": True, "torch": torch.__version__, "torchaudio": torchaudio.__version__}
-    except Exception as e:
-        status["demucs"] = {"available": False, "error": str(e)}
-
     # Check services from app extensions
     from flask import current_app
     services = current_app.extensions.get('services', {})
