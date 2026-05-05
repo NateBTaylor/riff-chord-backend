@@ -10,9 +10,13 @@ import re
 import tempfile
 import uuid
 from flask import Blueprint, request, jsonify, send_file
+from extensions import limiter
+from config import get_config
 from utils.logging import log_info, log_debug
 
 youtube_bp = Blueprint('youtube', __name__, url_prefix='/api/youtube')
+
+config = get_config()
 
 
 def _is_youtube_url(url: str) -> bool:
@@ -22,6 +26,7 @@ def _is_youtube_url(url: str) -> bool:
 
 
 @youtube_bp.route('/audio', methods=['POST'])
+@limiter.limit(config.get_rate_limit('heavy_processing'))
 def extract_audio():
     """
     Extract audio from a YouTube URL using yt-dlp.

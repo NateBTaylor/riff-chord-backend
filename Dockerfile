@@ -50,4 +50,4 @@ ENV FLASK_ENV=production
 ENV FLASK_DEBUG=False
 ENV PYTHONUNBUFFERED=1
 
-CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "1", "--timeout", "600", "--worker-class", "sync", "--preload", "app:app"]
+CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "2", "--threads", "2", "--timeout", "600", "--worker-class", "gthread", "--preload", "app:app"]
