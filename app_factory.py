@@ -82,6 +82,7 @@ def register_blueprints(app: Flask, config) -> None:
     from blueprints.songformer import songformer_bp
     from blueprints.analyze import analyze_bp
     from blueprints.youtube import youtube_bp
+    from blueprints.jobs import jobs_bp
     from blueprints.debug import debug_bp
 
     # Register blueprints
@@ -93,6 +94,7 @@ def register_blueprints(app: Flask, config) -> None:
     app.register_blueprint(songformer_bp)
     app.register_blueprint(analyze_bp)
     app.register_blueprint(youtube_bp)
+    app.register_blueprint(jobs_bp)
 
     # Register debug blueprint only in non-production mode
     if not config.PRODUCTION_MODE:
@@ -173,5 +175,19 @@ def init_services(app: Flask, config) -> None:
 
     # Store services in app extensions
     app.extensions['services'] = services
+
+    # Initialize job service (requires Redis)
+    redis_url = config.REDIS_URL
+    if redis_url:
+        try:
+            from services.job_service import JobService
+            app.extensions['job_service'] = JobService(redis_url)
+            log_info("Job service initialized (Redis connected)")
+        except Exception as e:
+            app.extensions['job_service'] = None
+            log_info(f"Job service unavailable (Redis not reachable): {e}")
+    else:
+        app.extensions['job_service'] = None
+        log_info("Job service skipped (REDIS_URL not set)")
 
     log_info("Service container initialized")
