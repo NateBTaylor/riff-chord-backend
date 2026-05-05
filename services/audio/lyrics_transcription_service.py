@@ -92,8 +92,9 @@ class LyricsTranscriptionService:
                 word_timestamps=True,
                 vad_filter=True,
                 vad_parameters=dict(
-                    min_silence_duration_ms=300,
-                    speech_pad_ms=200,
+                    min_silence_duration_ms=500,
+                    speech_pad_ms=400,
+                    threshold=0.3,
                 ),
             )
 
