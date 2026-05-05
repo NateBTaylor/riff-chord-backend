@@ -60,6 +60,16 @@ def extract_audio():
             'extract_flat': False,
             'noplaylist': True,
             'socket_timeout': 30,
+            # Use player clients that work without cookies on server IPs
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['mediaconnect', 'android_vr'],
+                },
+            },
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                'Accept-Language': 'en-US,en;q=0.9',
+            },
             # Post-process to m4a if needed
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
