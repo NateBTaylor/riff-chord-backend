@@ -1,8 +1,7 @@
 """
-YouTube search blueprint for ChordMini Flask application.
+YouTube audio extraction blueprint.
 
-This blueprint provides YouTube search endpoints using Piped API
-with fallback strategies.
+Provides an endpoint to extract audio from YouTube URLs via yt-dlp.
 """
 
 from .routes import youtube_bp
