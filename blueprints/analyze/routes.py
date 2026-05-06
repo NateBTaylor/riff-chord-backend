@@ -5,10 +5,13 @@ Pipeline: beat detection (librosa) → chord recognition + lyrics transcription 
 """
 
 import gc
+import json
 import os
+import threading
 import time
 import tempfile
 import traceback
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Blueprint, request, jsonify, current_app
 from extensions import limiter
@@ -108,6 +111,8 @@ def analyze():
             log_info("Step 3/3: Lyrics transcription")
             return lyrics_service.transcribe(audio_path=temp_file_path)
 
+        lyrics_job_id = None
+
         if lyrics_service:
             executor = ThreadPoolExecutor(max_workers=2)
             chord_future = executor.submit(run_chords)
@@ -118,11 +123,54 @@ def analyze():
             except Exception as e:
                 log_error(f"Chord recognition failed: {e}")
 
-            # Wait up to 20s for lyrics — don't block response on slow transcription
+            # Wait up to 20s for lyrics with the initial response
             try:
                 lyrics_result = lyrics_future.result(timeout=20)
             except Exception as e:
-                log_info(f"Lyrics skipped (timed out or failed): {e}")
+                log_info(f"Lyrics not ready in 20s, continuing in background")
+                # Let lyrics finish in background and store result in Redis
+                job_service = current_app.extensions.get('job_service')
+                if job_service:
+                    lyrics_job_id = uuid.uuid4().hex[:12]
+                    job_service.redis.hset(f"lyrics:{lyrics_job_id}", mapping={
+                        "status": "processing",
+                    })
+                    job_service.redis.expire(f"lyrics:{lyrics_job_id}", 600)
+
+                    redis_client = job_service.redis
+                    def finish_lyrics():
+                        try:
+                            result = lyrics_future.result(timeout=300)
+                            if result and result.get('success'):
+                                words = result.get('lyrics', [])
+                                redis_client.hset(f"lyrics:{lyrics_job_id}", mapping={
+                                    "status": "complete",
+                                    "result": json.dumps(words),
+                                    "total_words": len(words),
+                                })
+                                log_info(f"[Lyrics {lyrics_job_id}] Background complete: {len(words)} words")
+                            else:
+                                error = result.get('error', 'Unknown') if result else 'Unknown'
+                                redis_client.hset(f"lyrics:{lyrics_job_id}", mapping={
+                                    "status": "failed", "error": error,
+                                })
+                        except Exception as ex:
+                            log_error(f"[Lyrics {lyrics_job_id}] Background failed: {ex}")
+                            redis_client.hset(f"lyrics:{lyrics_job_id}", mapping={
+                                "status": "failed", "error": str(ex),
+                            })
+                        finally:
+                            # Clean up temp file if it still exists
+                            if temp_file_path and os.path.exists(temp_file_path):
+                                try:
+                                    os.unlink(temp_file_path)
+                                except Exception:
+                                    pass
+
+                    threading.Thread(target=finish_lyrics, daemon=True).start()
+                    # Prevent the finally block from deleting the temp file
+                    # while the background thread still needs it
+                    temp_file_path = None
 
             # Don't wait for still-running lyrics task to finish
             executor.shutdown(wait=False)
@@ -164,9 +212,14 @@ def analyze():
             "processing_time": round(processing_time, 1),
         }
 
+        # Include lyrics job ID so the client can poll for results
+        if lyrics_job_id:
+            response["lyrics_job_id"] = lyrics_job_id
+
         log_info(f"Combined analysis complete: {response['total_chords']} chords, "
                  f"{len(response['beats'])} beats, BPM {response['bpm']}, "
-                 f"{total_words} lyrics words, {response['processing_time']}s")
+                 f"{total_words} lyrics words, {response['processing_time']}s"
+                 f"{f', lyrics pending: {lyrics_job_id}' if lyrics_job_id else ''}")
 
         return jsonify(response)
 
@@ -180,10 +233,37 @@ def analyze():
             "traceback": traceback.format_exc() if not config.PRODUCTION_MODE else None
         }), 500
     finally:
-        # Clean up temp file
+        # Clean up temp file (skipped if background lyrics thread owns it)
         if temp_file_path and os.path.exists(temp_file_path):
             try:
                 os.unlink(temp_file_path)
                 log_debug(f"Cleaned up temp file: {temp_file_path}")
             except Exception as e:
                 log_error(f"Failed to clean up temp file {temp_file_path}: {e}")
+
+
+@analyze_bp.route('/api/lyrics/<lyrics_id>', methods=['GET'])
+def get_lyrics(lyrics_id):
+    """Poll for background lyrics transcription results."""
+    job_service = current_app.extensions.get('job_service')
+    if not job_service:
+        return jsonify({"error": "Service unavailable"}), 503
+
+    data = job_service.redis.hgetall(f"lyrics:{lyrics_id}")
+    if not data:
+        return jsonify({"error": "Not found"}), 404
+
+    status = data.get("status", "unknown")
+    if status == "processing":
+        return jsonify({"status": "processing"}), 202
+
+    if status == "complete":
+        lyrics = json.loads(data.get("result", "[]"))
+        total_words = int(data.get("total_words", 0))
+        return jsonify({
+            "status": "complete",
+            "lyrics": lyrics,
+            "total_words": total_words,
+        })
+
+    return jsonify({"status": "failed", "error": data.get("error", "Unknown")}), 500
