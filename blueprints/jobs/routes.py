@@ -43,7 +43,7 @@ def submit_job():
     # Parse parameters
     params = {
         "model": request.form.get('model', 'chord-cnn-lstm').lower(),
-        "detector": request.form.get('detector', 'madmom').lower(),
+        "detector": request.form.get('detector', 'librosa').lower(),
         "chord_dict": request.form.get('chord_dict', None),
     }
 

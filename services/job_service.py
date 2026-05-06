@@ -79,7 +79,7 @@ class JobService:
                 params = json.loads(job["params"])
                 temp_file_path = job["temp_file_path"]
                 model = params.get("model", "chord-cnn-lstm")
-                detector = params.get("detector", "madmom")
+                detector = params.get("detector", "librosa")
                 chord_dict = params.get("chord_dict")
 
                 from flask import current_app
