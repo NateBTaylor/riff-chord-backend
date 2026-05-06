@@ -127,13 +127,14 @@ class ChromaChordDetectorService:
             no_chord_mask = (energy < energy_threshold) | (best_score < 0.5)
             best_idx[no_chord_mask] = n_idx
 
-            # Smooth with median filter (removes single-frame glitches)
+            # Smooth with median filter (removes short glitches)
             from scipy.ndimage import median_filter
-            smoothed = median_filter(best_idx.astype(np.float64), size=7)
+            smoothed = median_filter(best_idx.astype(np.float64), size=15)
             smoothed = smoothed.astype(int)
 
             # Merge consecutive frames with the same chord into segments
-            chords = []
+            min_chord_duration = 1.0  # Minimum 1 second per chord
+            raw_chords = []
             if n_frames > 0:
                 seg_start = 0
                 seg_chord = smoothed[0]
@@ -142,29 +143,40 @@ class ChromaChordDetectorService:
                         chord_name = CHORD_NAMES[seg_chord]
                         start_sec = seg_start * frame_duration
                         end_sec = i * frame_duration
-                        if chord_name != 'N' and (end_sec - start_sec) >= 0.3:
-                            chords.append({
-                                "start": round(start_sec, 3),
-                                "end": round(end_sec, 3),
-                                "chord": chord_name,
-                                "confidence": round(float(
-                                    np.mean(best_score[seg_start:i])
-                                ), 3),
-                            })
+                        raw_chords.append({
+                            "start": start_sec,
+                            "end": end_sec,
+                            "chord": chord_name,
+                            "confidence": float(np.mean(best_score[seg_start:i])),
+                        })
                         seg_start = i
                         seg_chord = smoothed[i]
                 # Final segment
                 chord_name = CHORD_NAMES[seg_chord]
                 start_sec = seg_start * frame_duration
                 end_sec = n_frames * frame_duration
-                if chord_name != 'N' and (end_sec - start_sec) >= 0.3:
+                raw_chords.append({
+                    "start": start_sec,
+                    "end": end_sec,
+                    "chord": chord_name,
+                    "confidence": float(np.mean(best_score[seg_start:n_frames])),
+                })
+
+            # Absorb short segments into their neighbors
+            chords = []
+            for seg in raw_chords:
+                if seg["chord"] == "N":
+                    continue
+                dur = seg["end"] - seg["start"]
+                if dur < min_chord_duration and chords:
+                    # Extend the previous chord to cover this gap
+                    chords[-1]["end"] = seg["end"]
+                elif dur >= min_chord_duration:
                     chords.append({
-                        "start": round(start_sec, 3),
-                        "end": round(end_sec, 3),
-                        "chord": chord_name,
-                        "confidence": round(float(
-                            np.mean(best_score[seg_start:n_frames])
-                        ), 3),
+                        "start": round(seg["start"], 3),
+                        "end": round(seg["end"], 3),
+                        "chord": seg["chord"],
+                        "confidence": round(seg["confidence"], 3),
                     })
 
             processing_time = time.time() - start_time
