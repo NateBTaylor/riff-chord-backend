@@ -131,13 +131,14 @@ class JobService:
                         chord_future = executor.submit(run_chords)
                         lyrics_future = executor.submit(run_lyrics)
                         try:
-                            chord_result = chord_future.result(timeout=300)
+                            chord_result = chord_future.result(timeout=120)
                         except Exception as e:
                             log_error(f"[Job {job_id}] Chord recognition failed: {e}")
+                        # Wait up to 20s for lyrics — don't block chords on slow transcription
                         try:
-                            lyrics_result = lyrics_future.result(timeout=300)
+                            lyrics_result = lyrics_future.result(timeout=20)
                         except Exception as e:
-                            log_error(f"[Job {job_id}] Lyrics transcription failed (non-fatal): {e}")
+                            log_info(f"[Job {job_id}] Lyrics skipped (timed out or failed): {e}")
                 else:
                     log_info(f"[Job {job_id}] Step 2/2: Chord recognition (lyrics service unavailable)")
                     try:
