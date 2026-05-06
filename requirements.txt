@@ -35,6 +35,9 @@ faster-whisper>=1.0.0
 # YouTube audio extraction (keep latest — YouTube breaks older versions)
 yt-dlp>=2026.3.0
 
+# GPU stem separation (Replicate API)
+replicate>=0.25.0
+
 # Job queue
 redis>=5.0.0
 
