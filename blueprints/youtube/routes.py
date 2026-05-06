@@ -1,8 +1,8 @@
 """
-YouTube audio extraction routes.
+Audio extraction routes.
 
-Provides an endpoint that accepts a YouTube URL, extracts audio via yt-dlp,
-and returns the audio file to the client.
+Provides an endpoint that accepts a YouTube, TikTok, or Instagram URL,
+extracts audio via yt-dlp, and returns the audio file to the client.
 """
 
 import os
@@ -19,20 +19,26 @@ youtube_bp = Blueprint('youtube', __name__, url_prefix='/api/youtube')
 config = get_config()
 
 
-def _is_youtube_url(url: str) -> bool:
-    """Validate that the URL is a YouTube URL."""
-    pattern = r'^https?://(www\.)?(youtube\.com|youtu\.be|m\.youtube\.com)/'
-    return bool(re.match(pattern, url))
+_SUPPORTED_URL_PATTERNS = [
+    r'^https?://(www\.)?(youtube\.com|youtu\.be|m\.youtube\.com)/',
+    r'^https?://(www\.|vm\.|vt\.|m\.)?tiktok\.com/',
+    r'^https?://(www\.)?(instagram\.com|instagr\.am)/',
+]
+
+
+def _is_supported_url(url: str) -> bool:
+    """Validate that the URL is from a supported platform (YouTube, TikTok, Instagram)."""
+    return any(re.match(p, url) for p in _SUPPORTED_URL_PATTERNS)
 
 
 @youtube_bp.route('/audio', methods=['POST'])
 @limiter.limit(config.get_rate_limit('heavy_processing'))
 def extract_audio():
     """
-    Extract audio from a YouTube URL using yt-dlp.
+    Extract audio from a YouTube, TikTok, or Instagram URL using yt-dlp.
 
     Request JSON:
-        { "url": "https://www.youtube.com/watch?v=..." }
+        { "url": "https://..." }
 
     Returns:
         Audio file (m4a/mp3) as binary response.
@@ -46,10 +52,10 @@ def extract_audio():
     if not url:
         return jsonify({'error': 'Missing url parameter'}), 400
 
-    if not _is_youtube_url(url):
-        return jsonify({'error': 'URL must be a YouTube URL'}), 400
+    if not _is_supported_url(url):
+        return jsonify({'error': 'URL must be from YouTube, TikTok, or Instagram'}), 400
 
-    log_info(f"[YouTube] Audio extraction requested for: {url[:80]}")
+    log_info(f"[AudioExtract] Extraction requested for: {url[:80]}")
 
     tmpdir = tempfile.mkdtemp(prefix='riff_yt_')
     output_template = os.path.join(tmpdir, f'{uuid.uuid4().hex}.%(ext)s')
