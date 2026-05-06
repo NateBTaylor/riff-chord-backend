@@ -109,20 +109,23 @@ def analyze():
             return lyrics_service.transcribe(audio_path=temp_file_path)
 
         if lyrics_service:
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                chord_future = executor.submit(run_chords)
-                lyrics_future = executor.submit(run_lyrics)
+            executor = ThreadPoolExecutor(max_workers=2)
+            chord_future = executor.submit(run_chords)
+            lyrics_future = executor.submit(run_lyrics)
 
-                try:
-                    chord_result = chord_future.result(timeout=120)
-                except Exception as e:
-                    log_error(f"Chord recognition failed: {e}")
+            try:
+                chord_result = chord_future.result(timeout=120)
+            except Exception as e:
+                log_error(f"Chord recognition failed: {e}")
 
-                # Wait up to 20s for lyrics — don't block chords on slow transcription
-                try:
-                    lyrics_result = lyrics_future.result(timeout=20)
-                except Exception as e:
-                    log_info(f"Lyrics skipped (timed out or failed): {e}")
+            # Wait up to 20s for lyrics — don't block response on slow transcription
+            try:
+                lyrics_result = lyrics_future.result(timeout=20)
+            except Exception as e:
+                log_info(f"Lyrics skipped (timed out or failed): {e}")
+
+            # Don't wait for still-running lyrics task to finish
+            executor.shutdown(wait=False)
         else:
             log_info("Step 2/2: Chord recognition (lyrics service unavailable)")
             try:
