@@ -90,9 +90,11 @@ def extract_audio():
             }],
         }
 
+        thumbnail_url = ''
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             title = info.get('title', 'audio')
+            thumbnail_url = info.get('thumbnail', '')
             log_info(f"[YouTube] Downloaded: {title}")
 
         # Find the output file (yt-dlp may change extension after post-processing)
@@ -112,12 +114,15 @@ def extract_audio():
 
         log_info(f"[YouTube] Sending {ext} file ({os.path.getsize(output_file) // 1024}KB)")
 
-        return send_file(
+        response = send_file(
             output_file,
             mimetype=mimetype,
             as_attachment=True,
             download_name=f'audio.{ext}',
         )
+        if thumbnail_url:
+            response.headers['X-Thumbnail-URL'] = thumbnail_url
+        return response
 
     except Exception as e:
         log_info(f"[YouTube] Extraction failed: {e}")
