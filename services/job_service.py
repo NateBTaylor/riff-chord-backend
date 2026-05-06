@@ -12,6 +12,7 @@ import threading
 import time
 import traceback
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 from utils.logging import log_info, log_error
 
@@ -85,13 +86,14 @@ class JobService:
                 from flask import current_app
                 chord_service = current_app.extensions['services']['chord_recognition']
                 beat_service = current_app.extensions['services']['beat_detection']
+                lyrics_service = current_app.extensions['services'].get('lyrics_transcription')
 
                 if not beat_service or not chord_service:
                     self.update_job(job_id, status="failed", error="Services unavailable")
                     return
 
-                # Step 1: Beat detection
-                log_info(f"[Job {job_id}] Step 1/2: Beat detection")
+                # Step 1: Beat detection (fast with librosa)
+                log_info(f"[Job {job_id}] Step 1/3: Beat detection")
                 beat_result = beat_service.detect_beats(
                     file_path=temp_file_path,
                     detector=detector,
@@ -105,21 +107,55 @@ class JobService:
 
                 gc.collect()
 
-                # Step 2: Chord recognition
+                # Step 2+3: Chord recognition + lyrics transcription in parallel
                 self.update_job(job_id, step="chord_recognition")
-                log_info(f"[Job {job_id}] Step 2/2: Chord recognition")
-                chord_result = chord_service.recognize_chords(
-                    file_path=temp_file_path,
-                    detector=model,
-                    chord_dict=chord_dict,
-                    force=False,
-                    use_spleeter=False,
-                )
+                chord_result = None
+                lyrics_result = None
+
+                def run_chords():
+                    log_info(f"[Job {job_id}] Step 2/3: Chord recognition")
+                    return chord_service.recognize_chords(
+                        file_path=temp_file_path,
+                        detector=model,
+                        chord_dict=chord_dict,
+                        force=False,
+                        use_spleeter=False,
+                    )
+
+                def run_lyrics():
+                    log_info(f"[Job {job_id}] Step 3/3: Lyrics transcription")
+                    return lyrics_service.transcribe(audio_path=temp_file_path)
+
+                if lyrics_service:
+                    with ThreadPoolExecutor(max_workers=2) as executor:
+                        chord_future = executor.submit(run_chords)
+                        lyrics_future = executor.submit(run_lyrics)
+                        try:
+                            chord_result = chord_future.result(timeout=300)
+                        except Exception as e:
+                            log_error(f"[Job {job_id}] Chord recognition failed: {e}")
+                        try:
+                            lyrics_result = lyrics_future.result(timeout=300)
+                        except Exception as e:
+                            log_error(f"[Job {job_id}] Lyrics transcription failed (non-fatal): {e}")
+                else:
+                    log_info(f"[Job {job_id}] Step 2/2: Chord recognition (lyrics service unavailable)")
+                    try:
+                        chord_result = run_chords()
+                    except Exception as e:
+                        log_error(f"[Job {job_id}] Chord recognition failed: {e}")
 
                 if not chord_result or not chord_result.get('success'):
                     error = chord_result.get('error') if chord_result else 'Unknown'
                     self.update_job(job_id, status="failed", error=f"Chord recognition failed: {error}")
                     return
+
+                # Extract lyrics (non-fatal if missing)
+                lyrics = []
+                total_words = 0
+                if lyrics_result and lyrics_result.get('success'):
+                    lyrics = lyrics_result.get('lyrics', [])
+                    total_words = lyrics_result.get('total_words', 0)
 
                 gc.collect()
 
@@ -135,8 +171,8 @@ class JobService:
                     "model_used": chord_result.get("model_used", model),
                     "chord_dict": chord_result.get("chord_dict", "submission"),
                     "used_spleeter": False,
-                    "lyrics": [],
-                    "total_words": 0,
+                    "lyrics": lyrics,
+                    "total_words": total_words,
                     "processing_time": round(processing_time, 1),
                 }
 
@@ -148,7 +184,7 @@ class JobService:
                 )
                 log_info(f"[Job {job_id}] Complete: {result['total_chords']} chords, "
                          f"{len(result['beats'])} beats, BPM {result['bpm']}, "
-                         f"{result['processing_time']}s")
+                         f"{total_words} lyrics words, {result['processing_time']}s")
 
             except Exception as e:
                 log_error(f"[Job {job_id}] Failed: {e}")

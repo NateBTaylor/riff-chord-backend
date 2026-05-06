@@ -1,8 +1,7 @@
 """
 Combined analysis endpoint for Riff iOS app.
 
-Runs beat detection then chord recognition sequentially.
-Lyrics are handled on-device by the iOS app (LRCLIB + WhisperKit).
+Pipeline: beat detection (librosa) → chord recognition + lyrics transcription in parallel.
 """
 
 import gc
@@ -10,6 +9,7 @@ import os
 import time
 import tempfile
 import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask import Blueprint, request, jsonify, current_app
 from extensions import limiter
 from config import get_config
@@ -28,12 +28,13 @@ def analyze():
     """
     Combined analysis: beat detection + chord recognition + lyrics transcription.
 
-    Runs sequentially to stay within Railway's memory budget.
+    Beat detection runs first (fast with librosa), then chord recognition and
+    lyrics transcription run in parallel to minimize total wall time.
 
     Parameters:
     - file: Audio file (multipart/form-data)
     - model: Chord model (default 'chord-cnn-lstm')
-    - detector: Beat detector (default 'madmom')
+    - detector: Beat detector (default 'librosa')
     - chord_dict: Chord dictionary (optional)
 
     Returns:
@@ -64,14 +65,15 @@ def analyze():
         # Get services
         chord_service = current_app.extensions['services']['chord_recognition']
         beat_service = current_app.extensions['services']['beat_detection']
+        lyrics_service = current_app.extensions['services'].get('lyrics_transcription')
 
         if not chord_service:
             return jsonify({"error": "Chord recognition service unavailable"}), 503
         if not beat_service:
             return jsonify({"error": "Beat detection service unavailable"}), 503
 
-        # --- Step 1: Beat detection ---
-        log_info("Step 1/2: Beat detection")
+        # --- Step 1: Beat detection (fast with librosa ~2-5s) ---
+        log_info("Step 1/3: Beat detection")
         beat_result = None
         try:
             beat_result = beat_service.detect_beats(
@@ -86,28 +88,59 @@ def analyze():
             error = beat_result.get('error') if beat_result else 'Unknown'
             return jsonify({"success": False, "error": f"Beat detection failed: {error}"}), 500
 
-        # Free intermediate memory before loading next model
         gc.collect()
 
-        # --- Step 2: Chord recognition ---
-        log_info("Step 2/2: Chord recognition")
+        # --- Step 2+3: Chord recognition + lyrics transcription in parallel ---
         chord_result = None
-        try:
-            chord_result = chord_service.recognize_chords(
+        lyrics_result = None
+
+        def run_chords():
+            log_info("Step 2/3: Chord recognition")
+            return chord_service.recognize_chords(
                 file_path=temp_file_path,
                 detector=model,
                 chord_dict=chord_dict,
                 force=False,
                 use_spleeter=False,
             )
-        except Exception as e:
-            log_error(f"Chord recognition failed: {e}")
+
+        def run_lyrics():
+            log_info("Step 3/3: Lyrics transcription")
+            return lyrics_service.transcribe(audio_path=temp_file_path)
+
+        if lyrics_service:
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                chord_future = executor.submit(run_chords)
+                lyrics_future = executor.submit(run_lyrics)
+
+                try:
+                    chord_result = chord_future.result(timeout=300)
+                except Exception as e:
+                    log_error(f"Chord recognition failed: {e}")
+
+                try:
+                    lyrics_result = lyrics_future.result(timeout=300)
+                except Exception as e:
+                    log_error(f"Lyrics transcription failed (non-fatal): {e}")
+        else:
+            log_info("Step 2/2: Chord recognition (lyrics service unavailable)")
+            try:
+                chord_result = run_chords()
+            except Exception as e:
+                log_error(f"Chord recognition failed: {e}")
 
         if not chord_result or not chord_result.get('success'):
             error = chord_result.get('error') if chord_result else 'Unknown'
             return jsonify({"success": False, "error": f"Chord recognition failed: {error}"}), 500
 
-        # Free memory
+        # Extract lyrics (non-fatal if missing)
+        lyrics = []
+        total_words = 0
+        if lyrics_result and lyrics_result.get('success'):
+            lyrics = lyrics_result.get('lyrics', [])
+            total_words = lyrics_result.get('total_words', 0)
+            log_info(f"Lyrics: {total_words} words in {lyrics_result.get('processing_time', 0)}s")
+
         gc.collect()
 
         processing_time = time.time() - start_time
@@ -122,14 +155,14 @@ def analyze():
             "model_used": chord_result.get("model_used", model),
             "chord_dict": chord_result.get("chord_dict", "submission"),
             "used_spleeter": False,
-            "lyrics": [],
-            "total_words": 0,
+            "lyrics": lyrics,
+            "total_words": total_words,
             "processing_time": round(processing_time, 1),
         }
 
         log_info(f"Combined analysis complete: {response['total_chords']} chords, "
                  f"{len(response['beats'])} beats, BPM {response['bpm']}, "
-                 f"{response['processing_time']}s")
+                 f"{total_words} lyrics words, {response['processing_time']}s")
 
         return jsonify(response)
 
