@@ -12,8 +12,11 @@ RUN apt-get update && apt-get install -y \
 RUN pip install --no-cache-dir --upgrade pip "setuptools==79.0.1" wheel
 RUN pip install --no-cache-dir Cython>=0.29.0 numpy==1.26.4
 
-# Install PyTorch CPU-only (~250MB vs ~900MB for full)
-RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+# Install PyTorch CPU-only + torchaudio (~300MB vs ~900MB for full)
+RUN pip install --no-cache-dir torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+
+# Install Demucs for vocal stem separation (better lyrics transcription)
+RUN pip install --no-cache-dir demucs
 
 # Install madmom (beat detection) from git
 RUN pip install --no-cache-dir git+https://github.com/CPJKU/madmom

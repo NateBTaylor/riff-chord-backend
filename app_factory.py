@@ -164,6 +164,20 @@ def init_services(app: Flask, config) -> None:
         log_info(f"Failed to initialize lyrics transcription service: {e}")
         services['lyrics_transcription'] = None
 
+    # Initialize stem separation service (Demucs for vocal isolation)
+    try:
+        from services.audio.spleeter_service import SpleeterService
+        spleeter = SpleeterService()
+        if spleeter.is_available():
+            services['spleeter'] = spleeter
+            log_info("Stem separation service initialized (Demucs htdemucs)")
+        else:
+            services['spleeter'] = None
+            log_info("Stem separation service unavailable (Demucs not installed)")
+    except Exception as e:
+        log_info(f"Failed to initialize stem separation service: {e}")
+        services['spleeter'] = None
+
     # Initialize SongFormer service
     try:
         from services.audio.songformer_service import SongFormerService

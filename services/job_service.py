@@ -87,6 +87,7 @@ class JobService:
                 chord_service = current_app.extensions['services']['chord_recognition']
                 beat_service = current_app.extensions['services']['beat_detection']
                 lyrics_service = current_app.extensions['services'].get('lyrics_transcription')
+                spleeter_service = current_app.extensions['services'].get('spleeter')
 
                 if not beat_service or not chord_service:
                     self.update_job(job_id, status="failed", error="Services unavailable")
@@ -123,8 +124,28 @@ class JobService:
                     )
 
                 def run_lyrics():
-                    log_info(f"[Job {job_id}] Step 3/3: Lyrics transcription")
-                    return lyrics_service.transcribe(audio_path=temp_file_path)
+                    """Transcribe lyrics — uses Demucs vocal isolation when available."""
+                    audio_for_whisper = temp_file_path
+                    stems_info = None
+                    try:
+                        if spleeter_service and spleeter_service.is_available():
+                            log_info(f"[Job {job_id}] Step 3/3: Vocal separation + lyrics")
+                            stems_info = spleeter_service.extract_vocals(temp_file_path)
+                            if stems_info.get('success'):
+                                audio_for_whisper = stems_info['vocals_path']
+                                log_info(f"[Job {job_id}] Vocals isolated in {stems_info.get('processing_time', 0):.1f}s")
+                            else:
+                                log_error(f"[Job {job_id}] Vocal separation failed, using full mix")
+                                stems_info = None
+                        else:
+                            log_info(f"[Job {job_id}] Step 3/3: Lyrics transcription (no stem separation)")
+                        return lyrics_service.transcribe(audio_path=audio_for_whisper)
+                    finally:
+                        if stems_info:
+                            try:
+                                spleeter_service.cleanup_stems(stems_info)
+                            except Exception:
+                                pass
 
                 if lyrics_service:
                     executor = ThreadPoolExecutor(max_workers=2)
@@ -134,11 +155,11 @@ class JobService:
                         chord_result = chord_future.result(timeout=120)
                     except Exception as e:
                         log_error(f"[Job {job_id}] Chord recognition failed: {e}")
-                    # Wait up to 20s for lyrics — don't block response on slow transcription
+                    # Wait for lyrics (may take several minutes with Demucs separation)
                     try:
-                        lyrics_result = lyrics_future.result(timeout=20)
+                        lyrics_result = lyrics_future.result(timeout=600)
                     except Exception as e:
-                        log_info(f"[Job {job_id}] Lyrics skipped (timed out or failed): {e}")
+                        log_info(f"[Job {job_id}] Lyrics failed or timed out: {e}")
                     executor.shutdown(wait=False)
                 else:
                     log_info(f"[Job {job_id}] Step 2/2: Chord recognition (lyrics service unavailable)")

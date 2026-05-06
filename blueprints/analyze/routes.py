@@ -69,6 +69,7 @@ def analyze():
         chord_service = current_app.extensions['services']['chord_recognition']
         beat_service = current_app.extensions['services']['beat_detection']
         lyrics_service = current_app.extensions['services'].get('lyrics_transcription')
+        spleeter_service = current_app.extensions['services'].get('spleeter')
 
         if not chord_service:
             return jsonify({"error": "Chord recognition service unavailable"}), 503
@@ -108,8 +109,29 @@ def analyze():
             )
 
         def run_lyrics():
-            log_info("Step 3/3: Lyrics transcription")
-            return lyrics_service.transcribe(audio_path=temp_file_path)
+            """Transcribe lyrics — uses Demucs vocal isolation when available."""
+            audio_for_whisper = temp_file_path
+            stems_info = None
+            try:
+                if spleeter_service and spleeter_service.is_available():
+                    log_info("Step 3/3: Vocal separation (Demucs) + lyrics transcription")
+                    stems_info = spleeter_service.extract_vocals(temp_file_path)
+                    if stems_info.get('success'):
+                        audio_for_whisper = stems_info['vocals_path']
+                        log_info(f"Vocals isolated in {stems_info.get('processing_time', 0):.1f}s")
+                    else:
+                        log_error(f"Vocal separation failed, using full mix: {stems_info.get('error')}")
+                        stems_info = None
+                else:
+                    log_info("Step 3/3: Lyrics transcription (no stem separation)")
+
+                return lyrics_service.transcribe(audio_path=audio_for_whisper)
+            finally:
+                if stems_info:
+                    try:
+                        spleeter_service.cleanup_stems(stems_info)
+                    except Exception:
+                        pass
 
         lyrics_job_id = None
 
