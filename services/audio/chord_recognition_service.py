@@ -12,6 +12,7 @@ from utils.logging import log_info, log_error, log_debug
 from services.detectors.chord_cnn_lstm_detector import ChordCNNLSTMDetectorService
 from services.detectors.btc_sl_detector import BTCSLDetectorService
 from services.detectors.btc_pl_detector import BTCPLDetectorService
+from services.detectors.chroma_chord_detector import ChromaChordDetectorService
 from services.audio.audio_utils import validate_audio_file, get_audio_duration
 from services.audio.spleeter_service import SpleeterService
 from utils.chord_mappings import (
@@ -30,13 +31,15 @@ class ChordRecognitionService:
     def __init__(self):
         """Initialize the chord recognition service with available detectors."""
         self.detectors = {
+            'chroma': ChromaChordDetectorService(),
             'chord-cnn-lstm': ChordCNNLSTMDetectorService(str(CHORD_CNN_LSTM_DIR)),
             'btc-sl': BTCSLDetectorService(str(CHORDMINI_DIR)),
             'btc-pl': BTCPLDetectorService(str(CHORDMINI_DIR))
         }
-        
+
         # File size limits (in MB)
         self.size_limits = {
+            'chroma': 500,          # Very fast, handles any size
             'chord-cnn-lstm': 100,  # 100MB limit for Chord-CNN-LSTM
             'btc-sl': 50,          # 50MB limit for BTC-SL
             'btc-pl': 50           # 50MB limit for BTC-PL
@@ -83,7 +86,7 @@ class ChordRecognitionService:
         log_debug(f"Requested: {requested_detector}, File size: {file_size_mb:.1f}MB, Force: {force}")
         
         # Handle specific detector requests
-        if requested_detector in ['chord-cnn-lstm', 'btc-sl', 'btc-pl']:
+        if requested_detector in ['chroma', 'chord-cnn-lstm', 'btc-sl', 'btc-pl']:
             if requested_detector not in available_detectors:
                 log_error(f"{requested_detector} requested but not available")
                 # Fall back to best available option
@@ -115,28 +118,16 @@ class ChordRecognitionService:
         Returns:
             str: Selected detector name
         """
-        # Preference order: chord-cnn-lstm > btc-sl > btc-pl
-        # But consider file size limits
-        
-        if file_size_mb <= 50:  # Small files - prefer BTC models for better accuracy
-            if 'btc-sl' in available_detectors:
-                return 'btc-sl'
-            elif 'btc-pl' in available_detectors:
-                return 'btc-pl'
-        
-        if file_size_mb <= 100:  # Medium files - Chord-CNN-LSTM or BTC models
-            if 'chord-cnn-lstm' in available_detectors:
-                return 'chord-cnn-lstm'
-            elif 'btc-sl' in available_detectors:
-                return 'btc-sl'
-            elif 'btc-pl' in available_detectors:
-                return 'btc-pl'
-        
-        # Large files - prefer Chord-CNN-LSTM
+        # Prefer chroma (fast) for all sizes
+        if 'chroma' in available_detectors:
+            return 'chroma'
+
+        # Fallback to heavier models
         if 'chord-cnn-lstm' in available_detectors and file_size_mb <= self.size_limits['chord-cnn-lstm']:
             return 'chord-cnn-lstm'
-        
-        # Fallback to any available detector
+        if 'btc-sl' in available_detectors:
+            return 'btc-sl'
+
         return available_detectors[0]
     
     def _select_fallback_detector(self, available_detectors: List[str], file_size_mb: float) -> str:
@@ -157,8 +148,9 @@ class ChordRecognitionService:
         ]
         
         if suitable_detectors:
-            # Prefer chord-cnn-lstm for large files, then BTC models
-            if 'chord-cnn-lstm' in suitable_detectors:
+            if 'chroma' in suitable_detectors:
+                return 'chroma'
+            elif 'chord-cnn-lstm' in suitable_detectors:
                 return 'chord-cnn-lstm'
             elif 'btc-sl' in suitable_detectors:
                 return 'btc-sl'

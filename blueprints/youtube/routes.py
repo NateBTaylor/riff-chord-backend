@@ -64,7 +64,8 @@ def extract_audio():
         import yt_dlp
 
         ydl_opts = {
-            'format': 'bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio',
+            # For YouTube: prefer audio-only m4a; for TikTok/IG: accept any format
+            'format': 'bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio/best',
             'outtmpl': output_template,
             'quiet': True,
             'no_warnings': True,
@@ -81,7 +82,7 @@ def extract_audio():
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
                 'Accept-Language': 'en-US,en;q=0.9',
             },
-            # Post-process to m4a if needed
+            # Extract audio to m4a (handles video-only formats from TikTok/IG)
             'postprocessors': [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'm4a',

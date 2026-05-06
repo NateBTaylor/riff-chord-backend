@@ -55,6 +55,7 @@ CHORD_DICTIONARIES = {
 
 # Model-specific chord dictionary mappings
 MODEL_CHORD_DICT_MAPPING = {
+    'chroma': ['submission'],
     'chord-cnn-lstm': ['full', 'ismir2017', 'submission', 'extended'],
     'btc-sl': ['large_voca'],
     'btc-pl': ['large_voca']
@@ -62,6 +63,7 @@ MODEL_CHORD_DICT_MAPPING = {
 
 # Default chord dictionaries for each model
 DEFAULT_CHORD_DICTS = {
+    'chroma': 'submission',
     'chord-cnn-lstm': 'submission',
     'btc-sl': 'large_voca',
     'btc-pl': 'large_voca'
