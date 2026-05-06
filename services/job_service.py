@@ -79,7 +79,7 @@ class JobService:
 
                 params = json.loads(job["params"])
                 temp_file_path = job["temp_file_path"]
-                model = params.get("model", "chroma")
+                model = params.get("model", "auto")
                 detector = params.get("detector", "librosa")
                 chord_dict = params.get("chord_dict")
 

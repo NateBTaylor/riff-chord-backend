@@ -53,7 +53,7 @@ def analyze():
             return jsonify({"error": "No audio file provided"}), 400
 
         # Parse parameters
-        model = request.form.get('model', 'chroma').lower()
+        model = request.form.get('model', 'auto').lower()
         detector = request.form.get('detector', 'librosa').lower()
         chord_dict = request.form.get('chord_dict', None)
 

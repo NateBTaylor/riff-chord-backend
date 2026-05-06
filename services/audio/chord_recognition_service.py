@@ -13,6 +13,7 @@ from services.detectors.chord_cnn_lstm_detector import ChordCNNLSTMDetectorServi
 from services.detectors.btc_sl_detector import BTCSLDetectorService
 from services.detectors.btc_pl_detector import BTCPLDetectorService
 from services.detectors.chroma_chord_detector import ChromaChordDetectorService
+from services.detectors.replicate_chord_detector import ReplicateChordDetectorService
 from services.audio.audio_utils import validate_audio_file, get_audio_duration
 from services.audio.spleeter_service import SpleeterService
 from utils.chord_mappings import (
@@ -33,16 +34,18 @@ class ChordRecognitionService:
         self.detectors = {
             'chroma': ChromaChordDetectorService(),
             'chord-cnn-lstm': ChordCNNLSTMDetectorService(str(CHORD_CNN_LSTM_DIR)),
+            'replicate-cnn-lstm': ReplicateChordDetectorService(),
             'btc-sl': BTCSLDetectorService(str(CHORDMINI_DIR)),
             'btc-pl': BTCPLDetectorService(str(CHORDMINI_DIR))
         }
 
         # File size limits (in MB)
         self.size_limits = {
-            'chroma': 500,          # Very fast, handles any size
-            'chord-cnn-lstm': 100,  # 100MB limit for Chord-CNN-LSTM
-            'btc-sl': 50,          # 50MB limit for BTC-SL
-            'btc-pl': 50           # 50MB limit for BTC-PL
+            'chroma': 500,              # Very fast, handles any size
+            'chord-cnn-lstm': 100,      # 100MB limit for local Chord-CNN-LSTM
+            'replicate-cnn-lstm': 500,  # Replicate handles large files
+            'btc-sl': 50,              # 50MB limit for BTC-SL
+            'btc-pl': 50              # 50MB limit for BTC-PL
         }
         
         # Initialize Spleeter service
@@ -86,7 +89,7 @@ class ChordRecognitionService:
         log_debug(f"Requested: {requested_detector}, File size: {file_size_mb:.1f}MB, Force: {force}")
         
         # Handle specific detector requests
-        if requested_detector in ['chroma', 'chord-cnn-lstm', 'btc-sl', 'btc-pl']:
+        if requested_detector in ['chroma', 'chord-cnn-lstm', 'replicate-cnn-lstm', 'btc-sl', 'btc-pl']:
             if requested_detector not in available_detectors:
                 log_error(f"{requested_detector} requested but not available")
                 # Fall back to best available option
@@ -110,19 +113,23 @@ class ChordRecognitionService:
     def _auto_select_detector(self, available_detectors: List[str], file_size_mb: float) -> str:
         """
         Automatically select the best detector based on availability and file size.
-        
+
         Args:
             available_detectors: List of available detector names
             file_size_mb: File size in megabytes
-            
+
         Returns:
             str: Selected detector name
         """
-        # Prefer chroma (fast) for all sizes
+        # Prefer Replicate GPU CNN-LSTM (best accuracy, fast on GPU)
+        if 'replicate-cnn-lstm' in available_detectors:
+            return 'replicate-cnn-lstm'
+
+        # Fallback to chroma (fast on CPU)
         if 'chroma' in available_detectors:
             return 'chroma'
 
-        # Fallback to heavier models
+        # Fallback to heavier local models
         if 'chord-cnn-lstm' in available_detectors and file_size_mb <= self.size_limits['chord-cnn-lstm']:
             return 'chord-cnn-lstm'
         if 'btc-sl' in available_detectors:
@@ -148,7 +155,9 @@ class ChordRecognitionService:
         ]
         
         if suitable_detectors:
-            if 'chroma' in suitable_detectors:
+            if 'replicate-cnn-lstm' in suitable_detectors:
+                return 'replicate-cnn-lstm'
+            elif 'chroma' in suitable_detectors:
                 return 'chroma'
             elif 'chord-cnn-lstm' in suitable_detectors:
                 return 'chord-cnn-lstm'
