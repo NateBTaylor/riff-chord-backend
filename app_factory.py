@@ -153,10 +153,10 @@ def init_services(app: Flask, config) -> None:
     # Initialize lyrics transcription service (server-side Whisper)
     try:
         from services.audio.lyrics_transcription_service import LyricsTranscriptionService
-        lyrics_transcription = LyricsTranscriptionService(model_size="tiny")
+        lyrics_transcription = LyricsTranscriptionService(model_size="base")
         if lyrics_transcription.is_available():
             services['lyrics_transcription'] = lyrics_transcription
-            log_info("Lyrics transcription service initialized (tiny model)")
+            log_info("Lyrics transcription service initialized (base model)")
         else:
             services['lyrics_transcription'] = None
             log_info("Lyrics transcription service unavailable (faster-whisper not installed)")

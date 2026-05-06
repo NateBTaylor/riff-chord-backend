@@ -96,6 +96,7 @@ class LyricsTranscriptionService:
                     speech_pad_ms=600,
                     threshold=0.15,
                 ),
+                initial_prompt="Song lyrics, verse and chorus:",
             )
 
             words: List[Dict[str, Any]] = []
