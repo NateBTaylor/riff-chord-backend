@@ -80,9 +80,11 @@ class LibrosaDetectorService:
 
             import librosa
 
-            # Load audio
-            y, sr = librosa.load(file_path, sr=None)
-            duration = librosa.get_duration(y=y, sr=sr)
+            # Load audio at 22050Hz mono (standard for beat detection, ~4x less
+            # memory than native 44100Hz).  Cap at 3 minutes so longer YouTube
+            # songs don't OOM the Railway container.
+            y, sr = librosa.load(file_path, sr=22050, mono=True, duration=180)
+            duration = librosa.get_duration(filename=file_path)
 
             # Detect beats
             tempo, beats = librosa.beat.beat_track(y=y, sr=sr)
