@@ -121,11 +121,7 @@ class ChordRecognitionService:
         Returns:
             str: Selected detector name
         """
-        # Prefer Replicate GPU CNN-LSTM (best accuracy, fast on GPU)
-        if 'replicate-cnn-lstm' in available_detectors:
-            return 'replicate-cnn-lstm'
-
-        # Fallback to chroma (fast on CPU)
+        # Prefer chroma — fast, reliable on any hardware
         if 'chroma' in available_detectors:
             return 'chroma'
 
@@ -134,6 +130,10 @@ class ChordRecognitionService:
             return 'chord-cnn-lstm'
         if 'btc-sl' in available_detectors:
             return 'btc-sl'
+
+        # Replicate GPU (only if explicitly available and nothing else works)
+        if 'replicate-cnn-lstm' in available_detectors:
+            return 'replicate-cnn-lstm'
 
         return available_detectors[0]
     
@@ -155,9 +155,7 @@ class ChordRecognitionService:
         ]
         
         if suitable_detectors:
-            if 'replicate-cnn-lstm' in suitable_detectors:
-                return 'replicate-cnn-lstm'
-            elif 'chroma' in suitable_detectors:
+            if 'chroma' in suitable_detectors:
                 return 'chroma'
             elif 'chord-cnn-lstm' in suitable_detectors:
                 return 'chord-cnn-lstm'
