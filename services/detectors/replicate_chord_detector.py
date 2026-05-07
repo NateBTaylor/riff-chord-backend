@@ -194,6 +194,8 @@ class ReplicateChordDetectorService:
             data = json.loads(content)
             if isinstance(data, list):
                 return self._normalize_chord_list(data)
+            if isinstance(data, dict) and "chord_segments" in data:
+                return self._normalize_chord_list(data["chord_segments"])
             if isinstance(data, dict) and "chords" in data:
                 return self._normalize_chord_list(data["chords"])
             if isinstance(data, dict):
