@@ -312,7 +312,10 @@ class SpleeterService:
 
     def extract_vocals(self, audio_path: str, output_dir: Optional[str] = None) -> Dict[str, Any]:
         """
-        Extract vocals. Priority: Spleeter (cheap) → Demucs Replicate → local Demucs.
+        Extract vocals. Priority: Spleeter (cheap) → Demucs Replicate.
+
+        Skips local Demucs CPU to avoid OOM on constrained servers —
+        if Replicate fails, the caller should proceed without vocal isolation.
         """
         if self._check_replicate():
             # Try Spleeter first (cheapest: $0.00022, ~1s)
@@ -325,9 +328,11 @@ class SpleeterService:
             result = self._extract_vocals_demucs_replicate(audio_path, output_dir)
             if result.get("success"):
                 return result
-            log_error(f"Replicate Demucs failed, trying local: {result.get('error')}")
+            log_error(f"Replicate Demucs also failed: {result.get('error')}")
 
-        # Fall back to local Demucs CPU
+            return {"success": False, "error": "All Replicate separation methods failed"}
+
+        # Local Demucs CPU only used when no Replicate token is set
         if self._check_local():
             result = self.separate_audio(audio_path, output_dir=output_dir)
             if result.get("success"):
