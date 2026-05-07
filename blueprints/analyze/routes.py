@@ -92,7 +92,8 @@ def analyze():
 
         if not beat_result or not beat_result.get('success'):
             error = beat_result.get('error') if beat_result else 'Unknown'
-            return jsonify({"success": False, "error": f"Beat detection failed: {error}"}), 500
+            log_error(f"Beat detection failed: {error} — continuing with chord recognition")
+            beat_result = {"success": True, "beats": [], "bpm": 0.0, "duration": 0.0}
 
         gc.collect()
 
@@ -132,8 +133,13 @@ def analyze():
                 log_error(f"Lyrics transcription failed: {e}")
 
         # Brief pause between Replicate calls to avoid 429 rate limits
-        log_info("Waiting 5s before next Replicate call to avoid rate limit...")
-        time.sleep(5)
+        # Only sleep if a Replicate call actually ran above (Spleeter or Whisper)
+        ran_replicate = stems_info is not None or (lyrics_result and lyrics_result.get('success'))
+        if ran_replicate:
+            log_info("Waiting 5s before chord Replicate call to avoid rate limit...")
+            time.sleep(5)
+        else:
+            log_info("No prior Replicate calls — skipping rate-limit pause")
 
         # --- Step 4: Chord recognition (Replicate CNN-LSTM on original audio, ~6s) ---
         log_info("Step 4/4: Chord recognition (on original audio)")

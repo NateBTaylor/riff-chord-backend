@@ -486,7 +486,19 @@ class SpleeterService:
                 return result
             log_error(f"Demucs 4-stem also failed: {result.get('error')}")
 
-        # Fallback: local Demucs (already returns both + other)
+            # Skip local Demucs CPU when Replicate is configured — it OOMs
+            # on constrained Railway containers for songs > ~60s.
+            if temp_dir_created and output_dir:
+                try:
+                    import shutil
+                    shutil.rmtree(output_dir)
+                except Exception:
+                    pass
+            return {"success": False,
+                    "error": "All Replicate separation methods failed",
+                    "processing_time": time.time() - start_time}
+
+        # Local Demucs CPU only used when no Replicate token is set
         if self._check_local():
             result = self.separate_audio(audio_path, output_dir=output_dir)
             if result.get("success"):
