@@ -433,7 +433,7 @@ class SpleeterService:
         Returns dict with vocals_path, accompaniment_path (and other_path
         when Demucs is used).
 
-        Priority: Replicate Demucs 4-stem → Replicate Spleeter 2-stem → local Demucs.
+        Priority: Replicate Spleeter 2-stem → Replicate Demucs 4-stem → local Demucs.
         """
         start_time = time.time()
         temp_dir_created = False
@@ -443,13 +443,7 @@ class SpleeterService:
             temp_dir_created = True
 
         if self._check_replicate():
-            # --- Try Demucs 4-stem first (vocals + other) ---
-            result = self._extract_stems_demucs_replicate(audio_path, output_dir)
-            if result.get("success"):
-                return result
-            log_error(f"Demucs 4-stem failed, trying Spleeter 2-stem: {result.get('error')}")
-
-            # --- Fallback: Spleeter 2-stem (vocals + accompaniment) ---
+            # --- Try Spleeter 2-stem first (fast: ~2-3s) ---
             try:
                 from utils.replicate_utils import replicate_run_with_retry
 
@@ -485,6 +479,12 @@ class SpleeterService:
 
             except Exception as e:
                 log_error(f"Replicate Spleeter stems failed: {e}")
+
+            # --- Fallback: Demucs 4-stem (slower but higher quality) ---
+            result = self._extract_stems_demucs_replicate(audio_path, output_dir)
+            if result.get("success"):
+                return result
+            log_error(f"Demucs 4-stem also failed: {result.get('error')}")
 
         # Fallback: local Demucs (already returns both + other)
         if self._check_local():

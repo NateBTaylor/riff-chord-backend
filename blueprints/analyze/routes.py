@@ -100,14 +100,14 @@ def analyze():
         audio_for_lyrics = temp_file_path
 
         if spleeter_service and spleeter_service.is_available():
-            log_info("Step 2/4: Stem separation (vocals + other)")
+            log_info("Step 2/4: Stem separation (vocals + accompaniment)")
             try:
                 stems_info = spleeter_service.extract_stems(temp_file_path)
                 if stems_info.get('success'):
-                    audio_for_chords = stems_info.get('other_path', stems_info.get('accompaniment_path', temp_file_path))
+                    audio_for_chords = stems_info.get('accompaniment_path', temp_file_path)
                     audio_for_lyrics = stems_info.get('vocals_path', temp_file_path)
                     log_info(f"Stems separated in {stems_info.get('processing_time', 0):.1f}s — "
-                             f"chords on other stem, lyrics on vocals stem")
+                             f"chords on accompaniment, lyrics on vocals")
                 else:
                     log_error(f"Stem separation failed, using full mix: {stems_info.get('error')}")
                     stems_info = None
