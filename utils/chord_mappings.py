@@ -57,6 +57,7 @@ CHORD_DICTIONARIES = {
 MODEL_CHORD_DICT_MAPPING = {
     'chroma': ['submission'],
     'chord-cnn-lstm': ['full', 'ismir2017', 'submission', 'extended'],
+    'replicate-cnn-lstm': ['full', 'ismir2017', 'submission', 'extended'],
     'btc-sl': ['large_voca'],
     'btc-pl': ['large_voca']
 }
@@ -65,6 +66,7 @@ MODEL_CHORD_DICT_MAPPING = {
 DEFAULT_CHORD_DICTS = {
     'chroma': 'submission',
     'chord-cnn-lstm': 'ismir2017',
+    'replicate-cnn-lstm': 'ismir2017',
     'btc-sl': 'large_voca',
     'btc-pl': 'large_voca'
 }

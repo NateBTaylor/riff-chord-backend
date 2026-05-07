@@ -114,8 +114,7 @@ class ChordRecognitionService:
         """
         Automatically select the best detector based on availability and file size.
 
-        Priority: chord-cnn-lstm (local, same accuracy as Replicate, no cold start)
-                  → chroma → replicate-cnn-lstm → btc-sl.
+        Priority: replicate-cnn-lstm (GPU, ~6s warm) → chroma → chord-cnn-lstm → btc-sl.
 
         Args:
             available_detectors: List of available detector names
@@ -124,17 +123,17 @@ class ChordRecognitionService:
         Returns:
             str: Selected detector name
         """
-        # Local CNN-LSTM — same model as Replicate but no cold start / cost
-        if 'chord-cnn-lstm' in available_detectors and file_size_mb <= self.size_limits['chord-cnn-lstm']:
-            return 'chord-cnn-lstm'
+        # Replicate GPU — accurate, fast when warm (~6s)
+        if 'replicate-cnn-lstm' in available_detectors:
+            return 'replicate-cnn-lstm'
 
-        # Chroma — fast fallback
+        # Chroma — fast local fallback
         if 'chroma' in available_detectors:
             return 'chroma'
 
-        # Replicate GPU — accurate but has cold-start latency
-        if 'replicate-cnn-lstm' in available_detectors:
-            return 'replicate-cnn-lstm'
+        # Local CNN-LSTM — too slow on constrained containers
+        if 'chord-cnn-lstm' in available_detectors and file_size_mb <= self.size_limits['chord-cnn-lstm']:
+            return 'chord-cnn-lstm'
 
         if 'btc-sl' in available_detectors:
             return 'btc-sl'
