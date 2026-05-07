@@ -116,6 +116,11 @@ def analyze():
         else:
             log_info("Step 2/4: Skipping stem separation (unavailable)")
 
+        # Brief pause between Replicate calls to avoid 429 rate limits
+        if stems_info:
+            log_info("Waiting 3s before Whisper to avoid Replicate rate limit...")
+            time.sleep(3)
+
         # --- Step 3: Lyrics transcription (Replicate Whisper, ~3s) ---
         lyrics_result = None
         if lyrics_service:
@@ -125,6 +130,10 @@ def analyze():
                 lyrics_result = lyrics_service.transcribe(audio_path=audio_for_lyrics)
             except Exception as e:
                 log_error(f"Lyrics transcription failed: {e}")
+
+        # Brief pause between Replicate calls to avoid 429 rate limits
+        log_info("Waiting 5s before next Replicate call to avoid rate limit...")
+        time.sleep(5)
 
         # --- Step 4: Chord recognition (Replicate CNN-LSTM on original audio, ~6s) ---
         log_info("Step 4/4: Chord recognition (on original audio)")

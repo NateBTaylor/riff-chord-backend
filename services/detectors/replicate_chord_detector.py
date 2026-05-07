@@ -101,89 +101,89 @@ class ReplicateChordDetectorService:
 
     def _parse_output(self, output) -> List[Dict[str, Any]]:
         """Parse Replicate model output into normalized chord list."""
-        log_info(f"Replicate chord output type: {type(output).__name__}")
-        log_info(f"Replicate chord output repr: {repr(output)[:500]}")
+        log_info(f"[chord-parse] output type={type(output).__name__}, "
+                 f"repr={repr(output)[:300]}")
 
-        # Resolve to string content first
         content = self._resolve_output_to_string(output)
         if content:
-            log_info(f"Resolved chord content ({len(content)} chars): {content[:300]}")
-            return self._parse_json_or_lab(content)
+            log_info(f"[chord-parse] resolved {len(content)} chars: "
+                     f"{content[:200]}")
+            chords = self._parse_json_or_lab(content)
+            log_info(f"[chord-parse] parsed {len(chords)} chords")
+            return chords
 
-        log_error(f"Could not resolve Replicate chord output to string")
+        log_error("[chord-parse] could not resolve output to string")
         return []
 
     def _resolve_output_to_string(self, output) -> Optional[str]:
-        """Resolve any Replicate output format to a string."""
+        """Resolve any Replicate output format to a string.
 
-        # URL string — download the file content
-        if isinstance(output, str) and output.startswith('http'):
-            log_info(f"Downloading chord output from URL: {output[:100]}")
-            try:
-                resp = requests.get(output, timeout=30)
+        Uses the same pattern as spleeter_service: str(output) gives the
+        URL for Replicate FileOutput objects, then download the content.
+        """
+        # Step 1: Try str(output) — for FileOutput this gives the URL
+        try:
+            output_url = str(output)
+            if output_url.startswith('http'):
+                log_info(f"[chord-resolve] downloading from str(output) URL: "
+                         f"{output_url[:120]}")
+                resp = requests.get(output_url, timeout=30)
                 resp.raise_for_status()
+                log_info(f"[chord-resolve] downloaded {len(resp.text)} chars, "
+                         f"status={resp.status_code}")
                 return resp.text
-            except Exception as e:
-                log_error(f"Failed to download chord output: {e}")
-                return None
+        except Exception as e:
+            log_error(f"[chord-resolve] str(output) URL download failed: {e}")
 
-        # Plain string (JSON or lab content)
+        # Step 2: Plain string content (JSON or lab)
         if isinstance(output, str):
+            log_info(f"[chord-resolve] plain string ({len(output)} chars)")
             return output
 
-        # FileOutput with url attribute — download it
-        if hasattr(output, 'url'):
-            url = str(output.url)
-            log_info(f"Downloading chord output from FileOutput.url: {url[:100]}")
-            try:
-                resp = requests.get(url, timeout=30)
-                resp.raise_for_status()
-                return resp.text
-            except Exception as e:
-                log_error(f"Failed to download chord FileOutput: {e}")
-                return None
-
-        # FileOutput with read() method
+        # Step 3: FileOutput with read() method
         if hasattr(output, 'read'):
             try:
-                content = output.read()
-                if isinstance(content, bytes):
-                    content = content.decode('utf-8')
+                log_info("[chord-resolve] trying output.read()")
+                data = output.read()
+                content = data.decode('utf-8') if isinstance(data, bytes) else data
+                log_info(f"[chord-resolve] read() got {len(content)} chars")
                 return content
             except Exception as e:
-                log_error(f"Failed to read chord FileOutput: {e}")
-                return None
+                log_error(f"[chord-resolve] read() failed: {e}")
 
-        # dict — serialize to JSON for parsing
-        if isinstance(output, dict):
+        # Step 4: dict or list — serialize to JSON
+        if isinstance(output, (dict, list)):
+            log_info(f"[chord-resolve] serializing {type(output).__name__} to JSON")
             return json.dumps(output)
 
-        # list — serialize to JSON for parsing
-        if isinstance(output, list):
-            return json.dumps(output)
-
-        # Iterable (streaming output) — collect chunks
+        # Step 5: Iterable (streaming text output) — collect chunks
         try:
+            log_info("[chord-resolve] trying iteration")
             chunks = []
             for chunk in output:
                 if isinstance(chunk, bytes):
                     chunks.append(chunk.decode('utf-8'))
                 elif isinstance(chunk, str):
                     chunks.append(chunk)
-                elif hasattr(chunk, 'url'):
-                    # FileOutput item in a list — download it
-                    url = str(chunk.url) if hasattr(chunk, 'url') else str(chunk)
-                    if url.startswith('http'):
-                        resp = requests.get(url, timeout=30)
+                else:
+                    # Sub-item might be a FileOutput — try its URL
+                    chunk_url = str(chunk)
+                    if chunk_url.startswith('http'):
+                        log_info(f"[chord-resolve] downloading chunk URL: "
+                                 f"{chunk_url[:120]}")
+                        resp = requests.get(chunk_url, timeout=30)
                         resp.raise_for_status()
                         return resp.text
             if chunks:
-                return ''.join(chunks)
+                joined = ''.join(chunks)
+                log_info(f"[chord-resolve] iterated {len(chunks)} chunks, "
+                         f"{len(joined)} chars total")
+                return joined
         except TypeError:
             pass
 
-        # Last resort
-        return str(output)
+        log_error(f"[chord-resolve] all methods failed for {type(output).__name__}")
+        return None
 
     def _parse_json_or_lab(self, content: str) -> List[Dict[str, Any]]:
         """Parse content as JSON or tab-separated lab format."""
