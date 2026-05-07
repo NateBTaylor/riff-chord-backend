@@ -114,11 +114,11 @@ class ChordRecognitionService:
         """
         Automatically select the best detector based on availability and file size.
 
-        Priority: chroma (fast, local, no Replicate contention) → chord-cnn-lstm
-                  → replicate-cnn-lstm → btc-sl.
+        Priority: replicate-cnn-lstm (best accuracy) → chroma (fast local)
+                  → chord-cnn-lstm → btc-sl.
 
-        Chroma is preferred because it runs locally (~0.5s) and avoids
-        Replicate rate-limit contention with spleeter/whisper calls.
+        Replicate calls are serialized via a threading lock in
+        replicate_run_with_retry, so no rate-limit contention.
 
         Args:
             available_detectors: List of available detector names
@@ -127,7 +127,11 @@ class ChordRecognitionService:
         Returns:
             str: Selected detector name
         """
-        # Chroma — fast, local, no Replicate rate-limit contention
+        # Replicate GPU — best accuracy
+        if 'replicate-cnn-lstm' in available_detectors:
+            return 'replicate-cnn-lstm'
+
+        # Chroma — fast, reliable on any hardware
         if 'chroma' in available_detectors:
             return 'chroma'
 
@@ -136,10 +140,6 @@ class ChordRecognitionService:
             return 'chord-cnn-lstm'
         if 'btc-sl' in available_detectors:
             return 'btc-sl'
-
-        # Replicate GPU as last resort (contends with spleeter/whisper rate limits)
-        if 'replicate-cnn-lstm' in available_detectors:
-            return 'replicate-cnn-lstm'
 
         return available_detectors[0]
     
