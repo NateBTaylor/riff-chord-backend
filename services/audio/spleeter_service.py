@@ -74,7 +74,7 @@ class SpleeterService:
 
             with open(audio_path, 'rb') as f:
                 output = replicate.run(
-                    "soykertje/spleeter",
+                    "soykertje/spleeter:cd128044253523c86abfd743dea680c88559ad975ccd72378c8433f067ab5d0a",
                     input={"audio": f},
                 )
 
@@ -127,7 +127,7 @@ class SpleeterService:
 
             with open(audio_path, 'rb') as f:
                 output = replicate.run(
-                    "cjwbw/demucs",
+                    "cjwbw/demucs:25a173108cff36ef9f80f854c162d01df9e6528be175794b81158fa03836d953",
                     input={"audio": f},
                 )
 
@@ -306,9 +306,131 @@ class SpleeterService:
 
         raise ValueError(f"Could not extract '{stem_name}' from output: {type(output)}")
 
+    @staticmethod
+    def _download_all_stems(output, stem_destinations: Dict[str, str]):
+        """
+        Download multiple stems from a single Replicate output in one pass.
+
+        Args:
+            output: Replicate model output (dict, list, iterable)
+            stem_destinations: mapping of stem name → dest path,
+                               e.g. {"vocals": "/tmp/vocals.wav", "accompaniment": "/tmp/acc.wav"}
+        """
+        # dict with stem URLs (e.g. {"vocals": "https://...", "accompaniment": "https://..."})
+        if isinstance(output, dict):
+            for stem_name, dest_path in stem_destinations.items():
+                for key, val in output.items():
+                    if stem_name.lower() in key.lower():
+                        urllib.request.urlretrieve(str(val), dest_path)
+                        break
+                else:
+                    log_error(f"Stem '{stem_name}' not found in output keys: {list(output.keys())}")
+            return
+
+        # iterable of FileOutputs / URLs (multi-stem)
+        try:
+            items = list(output)
+        except TypeError:
+            raise ValueError(f"Cannot iterate Replicate output: {type(output)}")
+
+        # Try name-matching first (URL often contains stem name)
+        matched = {}
+        for item in items:
+            item_str = str(item).lower()
+            for stem_name, dest_path in stem_destinations.items():
+                if stem_name.lower() in item_str and stem_name not in matched:
+                    matched[stem_name] = (item, dest_path)
+
+        # Fall back to positional matching for unmatched stems
+        # Spleeter 2-stem order: [vocals, accompaniment]
+        positional_map = {0: "vocals", 1: "accompaniment"}
+        for i, item in enumerate(items):
+            pos_name = positional_map.get(i)
+            if pos_name and pos_name in stem_destinations and pos_name not in matched:
+                matched[pos_name] = (item, stem_destinations[pos_name])
+
+        # Download all matched stems
+        for stem_name, (item, dest_path) in matched.items():
+            if hasattr(item, 'read'):
+                with open(dest_path, 'wb') as f:
+                    f.write(item.read())
+            else:
+                urllib.request.urlretrieve(str(item), dest_path)
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    def extract_stems(self, audio_path: str,
+                      output_dir: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Extract both vocals and accompaniment stems in a single Spleeter call.
+
+        Returns dict with vocals_path, accompaniment_path, and stems dict.
+        Priority: Replicate Spleeter → Replicate Demucs.
+        """
+        start_time = time.time()
+        temp_dir_created = False
+
+        if output_dir is None:
+            output_dir = tempfile.mkdtemp(prefix="spleeter_stems_")
+            temp_dir_created = True
+
+        if self._check_replicate():
+            try:
+                import replicate
+
+                log_info("Extracting both stems via Replicate Spleeter...")
+
+                vocals_path = os.path.join(output_dir, "vocals.wav")
+                accompaniment_path = os.path.join(output_dir, "accompaniment.wav")
+
+                with open(audio_path, 'rb') as f:
+                    output = replicate.run(
+                        "soykertje/spleeter:cd128044253523c86abfd743dea680c88559ad975ccd72378c8433f067ab5d0a",
+                        input={"audio": f},
+                    )
+
+                self._download_all_stems(output, {
+                    "vocals": vocals_path,
+                    "accompaniment": accompaniment_path,
+                })
+
+                processing_time = time.time() - start_time
+                log_info(f"Spleeter both stems: {processing_time:.1f}s")
+
+                return {
+                    "success": True,
+                    "vocals_path": vocals_path,
+                    "accompaniment_path": accompaniment_path,
+                    "stems": {"vocals": vocals_path, "accompaniment": accompaniment_path},
+                    "output_dir": output_dir,
+                    "model_used": "spleeter (replicate)",
+                    "processing_time": processing_time,
+                    "temp_dir_created": temp_dir_created,
+                }
+
+            except Exception as e:
+                log_error(f"Replicate Spleeter stems failed: {e}")
+
+        # Fallback: local Demucs (already returns both)
+        if self._check_local():
+            result = self.separate_audio(audio_path, output_dir=output_dir)
+            if result.get("success"):
+                stems = result.get("stems", {})
+                result["vocals_path"] = stems.get("vocals")
+                result["accompaniment_path"] = stems.get("accompaniment")
+            return result
+
+        if temp_dir_created and output_dir:
+            try:
+                import shutil
+                shutil.rmtree(output_dir)
+            except Exception:
+                pass
+
+        return {"success": False, "error": "No separation method available",
+                "processing_time": time.time() - start_time}
 
     def extract_vocals(self, audio_path: str, output_dir: Optional[str] = None) -> Dict[str, Any]:
         """

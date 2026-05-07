@@ -1,7 +1,7 @@
 """
 Combined analysis endpoint for Riff iOS app.
 
-Pipeline: beat detection (librosa) → chord recognition + lyrics transcription in parallel.
+Pipeline: beat detection → spleeter (both stems) → chord recognition (on accompaniment) + lyrics (on vocals) in parallel.
 """
 
 import gc
@@ -44,6 +44,7 @@ def analyze():
     - JSON with chords, beats, bpm, duration, lyrics, and metadata
     """
     temp_file_path = None
+    stems_info = None
     start_time = time.time()
 
     try:
@@ -95,44 +96,48 @@ def analyze():
 
         gc.collect()
 
-        # --- Step 2+3: Chord recognition + lyrics transcription in parallel ---
+        # --- Step 2: Spleeter stem separation (both vocals + accompaniment) ---
         chord_result = None
         lyrics_result = None
+        stems_info = None
+        audio_for_chords = temp_file_path
+        audio_for_lyrics = temp_file_path
 
+        if spleeter_service and spleeter_service.is_available():
+            log_info("Step 2/4: Stem separation (vocals + accompaniment)")
+            try:
+                stems_info = spleeter_service.extract_stems(temp_file_path)
+                if stems_info.get('success'):
+                    audio_for_chords = stems_info.get('accompaniment_path', temp_file_path)
+                    audio_for_lyrics = stems_info.get('vocals_path', temp_file_path)
+                    log_info(f"Stems separated in {stems_info.get('processing_time', 0):.1f}s — "
+                             f"chords on accompaniment, lyrics on vocals")
+                else:
+                    log_error(f"Stem separation failed, using full mix: {stems_info.get('error')}")
+                    stems_info = None
+            except Exception as e:
+                log_error(f"Stem separation error: {e}")
+                stems_info = None
+        else:
+            log_info("Step 2: Skipping stem separation (unavailable)")
+
+        # --- Step 3+4: Chord recognition + lyrics transcription in parallel ---
         def run_chords():
-            log_info("Step 2/3: Chord recognition")
+            log_info("Step 3/4: Chord recognition" +
+                     (" (on accompaniment)" if stems_info else " (on full mix)"))
             return chord_service.recognize_chords(
-                file_path=temp_file_path,
+                file_path=audio_for_chords,
                 detector=model,
                 chord_dict=chord_dict,
                 force=False,
-                use_spleeter=use_spleeter,
+                use_spleeter=False,  # separation already done
             )
 
         def run_lyrics():
-            """Transcribe lyrics — uses Demucs vocal isolation when available."""
-            audio_for_whisper = temp_file_path
-            stems_info = None
-            try:
-                if spleeter_service and spleeter_service.is_available():
-                    log_info("Step 3/3: Vocal separation (Demucs) + lyrics transcription")
-                    stems_info = spleeter_service.extract_vocals(temp_file_path)
-                    if stems_info.get('success'):
-                        audio_for_whisper = stems_info['vocals_path']
-                        log_info(f"Vocals isolated in {stems_info.get('processing_time', 0):.1f}s")
-                    else:
-                        log_error(f"Vocal separation failed, using full mix: {stems_info.get('error')}")
-                        stems_info = None
-                else:
-                    log_info("Step 3/3: Lyrics transcription (no stem separation)")
-
-                return lyrics_service.transcribe(audio_path=audio_for_whisper)
-            finally:
-                if stems_info:
-                    try:
-                        spleeter_service.cleanup_stems(stems_info)
-                    except Exception:
-                        pass
+            """Transcribe lyrics on vocals stem (or full mix as fallback)."""
+            log_info("Step 4/4: Lyrics transcription" +
+                     (" (on vocals stem)" if stems_info else " (on full mix)"))
+            return lyrics_service.transcribe(audio_path=audio_for_lyrics)
 
         lyrics_job_id = None
 
@@ -161,6 +166,8 @@ def analyze():
                     job_service.redis.expire(f"lyrics:{lyrics_job_id}", 600)
 
                     redis_client = job_service.redis
+                    bg_stems_info = stems_info
+                    bg_spleeter_service = spleeter_service
                     def finish_lyrics():
                         try:
                             result = lyrics_future.result(timeout=300)
@@ -183,6 +190,12 @@ def analyze():
                                 "status": "failed", "error": str(ex),
                             })
                         finally:
+                            # Clean up stems
+                            if bg_stems_info and bg_spleeter_service:
+                                try:
+                                    bg_spleeter_service.cleanup_stems(bg_stems_info)
+                                except Exception:
+                                    pass
                             # Clean up temp file if it still exists
                             if temp_file_path and os.path.exists(temp_file_path):
                                 try:
@@ -191,9 +204,10 @@ def analyze():
                                     pass
 
                     threading.Thread(target=finish_lyrics, daemon=True).start()
-                    # Prevent the finally block from deleting the temp file
-                    # while the background thread still needs it
+                    # Prevent the finally block from deleting the temp file / stems
+                    # while the background thread still needs them
                     temp_file_path = None
+                    stems_info = None
 
             # Don't wait for still-running lyrics task to finish
             executor.shutdown(wait=False)
@@ -229,7 +243,7 @@ def analyze():
             "total_chords": chord_result.get("total_chords", 0),
             "model_used": chord_result.get("model_used", model),
             "chord_dict": chord_result.get("chord_dict", "submission"),
-            "used_spleeter": use_spleeter,
+            "used_spleeter": stems_info is not None,
             "lyrics": lyrics,
             "total_words": total_words,
             "processing_time": round(processing_time, 1),
@@ -256,6 +270,15 @@ def analyze():
             "traceback": traceback.format_exc() if not config.PRODUCTION_MODE else None
         }), 500
     finally:
+        # Clean up stems (skipped if background lyrics thread owns temp files)
+        if stems_info and temp_file_path:
+            # Only clean stems if no background lyrics thread is running
+            # (temp_file_path is set to None when background thread takes over)
+            try:
+                spleeter_service.cleanup_stems(stems_info)
+            except Exception as e:
+                log_error(f"Failed to cleanup stems: {e}")
+
         # Clean up temp file (skipped if background lyrics thread owns it)
         if temp_file_path and os.path.exists(temp_file_path):
             try:

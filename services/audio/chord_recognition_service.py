@@ -114,6 +114,9 @@ class ChordRecognitionService:
         """
         Automatically select the best detector based on availability and file size.
 
+        Priority: replicate-cnn-lstm (best accuracy, GPU-fast) → chroma (fast, reliable)
+                  → chord-cnn-lstm (local) → btc-sl → whatever is available.
+
         Args:
             available_detectors: List of available detector names
             file_size_mb: File size in megabytes
@@ -121,7 +124,11 @@ class ChordRecognitionService:
         Returns:
             str: Selected detector name
         """
-        # Prefer chroma — fast, reliable on any hardware
+        # Prefer Replicate GPU — best accuracy, fast on GPU
+        if 'replicate-cnn-lstm' in available_detectors:
+            return 'replicate-cnn-lstm'
+
+        # Chroma — fast, reliable on any hardware
         if 'chroma' in available_detectors:
             return 'chroma'
 
@@ -130,10 +137,6 @@ class ChordRecognitionService:
             return 'chord-cnn-lstm'
         if 'btc-sl' in available_detectors:
             return 'btc-sl'
-
-        # Replicate GPU (only if explicitly available and nothing else works)
-        if 'replicate-cnn-lstm' in available_detectors:
-            return 'replicate-cnn-lstm'
 
         return available_detectors[0]
     
@@ -232,14 +235,14 @@ class ChordRecognitionService:
             spleeter_info = None
             
             if use_spleeter and self.spleeter_service.is_available():
-                log_info("Using Demucs for audio separation")
-                spleeter_result = self.spleeter_service.extract_vocals(file_path)
+                log_info("Using stem separation for chord recognition")
+                spleeter_result = self.spleeter_service.extract_stems(file_path)
                 if spleeter_result.get("success"):
-                    # Use the accompaniment track for chord recognition (no vocals/drums)
+                    # Use the accompaniment track for chord recognition (no vocals)
                     audio_file_to_process = spleeter_result.get("accompaniment_path", file_path)
                     spleeter_info = {
                         "used": True,
-                        "model": spleeter_result.get("model_used", "htdemucs"),
+                        "model": spleeter_result.get("model_used", "spleeter"),
                         "processing_time": spleeter_result.get("processing_time", 0.0)
                     }
                     log_info(f"Using separated accompaniment: {audio_file_to_process}")
