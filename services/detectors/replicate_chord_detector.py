@@ -59,12 +59,12 @@ class ReplicateChordDetectorService:
         start_time = time.time()
 
         try:
-            import replicate
+            from utils.replicate_utils import replicate_run_with_retry
 
             log_info(f"Running Chord-CNN-LSTM via Replicate GPU on: {file_path}")
 
             with open(file_path, 'rb') as f:
-                output = replicate.run(
+                output = replicate_run_with_retry(
                     self.MODEL_ID,
                     input={"audio": f},
                 )

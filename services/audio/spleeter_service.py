@@ -68,12 +68,12 @@ class SpleeterService:
             temp_dir_created = True
 
         try:
-            import replicate
+            from utils.replicate_utils import replicate_run_with_retry
 
             log_info("Separating vocals via Replicate Spleeter...")
 
             with open(audio_path, 'rb') as f:
-                output = replicate.run(
+                output = replicate_run_with_retry(
                     "soykertje/spleeter:cd128044253523c86abfd743dea680c88559ad975ccd72378c8433f067ab5d0a",
                     input={"audio": f},
                 )
@@ -121,12 +121,12 @@ class SpleeterService:
             temp_dir_created = True
 
         try:
-            import replicate
+            from utils.replicate_utils import replicate_run_with_retry
 
             log_info("Separating vocals via Replicate Demucs...")
 
             with open(audio_path, 'rb') as f:
-                output = replicate.run(
+                output = replicate_run_with_retry(
                     "cjwbw/demucs:25a173108cff36ef9f80f854c162d01df9e6528be175794b81158fa03836d953",
                     input={"audio": f},
                 )
@@ -378,7 +378,7 @@ class SpleeterService:
 
         if self._check_replicate():
             try:
-                import replicate
+                from utils.replicate_utils import replicate_run_with_retry
 
                 log_info("Extracting both stems via Replicate Spleeter...")
 
@@ -386,7 +386,7 @@ class SpleeterService:
                 accompaniment_path = os.path.join(output_dir, "accompaniment.wav")
 
                 with open(audio_path, 'rb') as f:
-                    output = replicate.run(
+                    output = replicate_run_with_retry(
                         "soykertje/spleeter:cd128044253523c86abfd743dea680c88559ad975ccd72378c8433f067ab5d0a",
                         input={"audio": f},
                     )
