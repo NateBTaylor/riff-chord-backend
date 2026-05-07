@@ -132,15 +132,15 @@ class ProductionConfig(Config):
     DEBUG = False
     PRODUCTION_MODE = True
 
-    # Strict rate limits for production
+    # Production rate limits (per IP address)
     RATE_LIMITS = {
         'health': "30 per minute",
-        'docs': "50 per minute",
-        'heavy_processing': "2 per minute",
+        'docs': "30 per minute",
+        'heavy_processing': "5 per minute",
         'moderate_processing': "10 per minute",
         'light_processing': "20 per minute",
-        'debug': "1 per minute",  # Very restrictive
-        'test': "1 per minute",   # Very restrictive
+        'debug': "1 per minute",
+        'test': "1 per minute",
     }
 
     # Disable debug endpoints in production
