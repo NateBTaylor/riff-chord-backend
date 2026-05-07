@@ -56,6 +56,7 @@ def analyze():
         model = request.form.get('model', 'auto').lower()
         detector = request.form.get('detector', 'librosa').lower()
         chord_dict = request.form.get('chord_dict', None)
+        use_spleeter = request.form.get('use_spleeter', 'false').lower() == 'true'
 
         # Save uploaded file
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.m4a')
@@ -105,7 +106,7 @@ def analyze():
                 detector=model,
                 chord_dict=chord_dict,
                 force=False,
-                use_spleeter=False,
+                use_spleeter=use_spleeter,
             )
 
         def run_lyrics():
@@ -228,7 +229,7 @@ def analyze():
             "total_chords": chord_result.get("total_chords", 0),
             "model_used": chord_result.get("model_used", model),
             "chord_dict": chord_result.get("chord_dict", "submission"),
-            "used_spleeter": False,
+            "used_spleeter": use_spleeter,
             "lyrics": lyrics,
             "total_words": total_words,
             "processing_time": round(processing_time, 1),

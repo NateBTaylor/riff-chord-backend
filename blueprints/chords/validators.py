@@ -46,7 +46,7 @@ def validate_chord_recognition_request() -> Tuple[bool, Optional[str], Optional[
         detector = request.form.get('detector', 'auto').lower()
         chord_dict = request.form.get('chord_dict', None)
 
-    valid_detectors = ['chord-cnn-lstm', 'btc-sl', 'btc-pl', 'auto']
+    valid_detectors = ['chord-cnn-lstm', 'replicate-cnn-lstm', 'chroma', 'btc-sl', 'btc-pl', 'auto']
     if detector not in valid_detectors:
         return False, f"Invalid detector '{detector}'. Must be one of: {', '.join(valid_detectors)}", file, {}
 
@@ -101,7 +101,7 @@ def validate_firebase_chord_recognition_request() -> Tuple[bool, Optional[str], 
 
     # Validate detector parameter
     detector = request.form.get('detector', 'auto').lower()
-    valid_detectors = ['chord-cnn-lstm', 'btc-sl', 'btc-pl', 'auto']
+    valid_detectors = ['chord-cnn-lstm', 'replicate-cnn-lstm', 'chroma', 'btc-sl', 'btc-pl', 'auto']
     if detector not in valid_detectors:
         return False, f"Invalid detector '{detector}'. Must be one of: {', '.join(valid_detectors)}", {}
 
@@ -231,7 +231,7 @@ def validate_model_name(model_name: str) -> bool:
     Returns:
         bool: True if the model name is valid
     """
-    valid_models = ['chord-cnn-lstm', 'btc-sl', 'btc-pl']
+    valid_models = ['chord-cnn-lstm', 'replicate-cnn-lstm', 'chroma', 'btc-sl', 'btc-pl']
     return model_name in valid_models
 
 
@@ -247,6 +247,8 @@ def get_detector_display_name(detector: str) -> str:
     """
     display_names = {
         'chord-cnn-lstm': 'Chord-CNN-LSTM',
+        'replicate-cnn-lstm': 'Chord-CNN-LSTM (Replicate GPU)',
+        'chroma': 'Chroma (Fast CPU)',
         'btc-sl': 'BTC SL (Self-Label)',
         'btc-pl': 'BTC PL (Pseudo-Label)',
         'auto': 'Auto Selection'

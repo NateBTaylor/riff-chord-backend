@@ -251,7 +251,17 @@ class ChordRecognitionService:
             
             # Run chord recognition
             result = detector_service.recognize_chords(audio_file_to_process, chord_dict)
-            
+
+            # Fallback: if auto-selected detector failed, retry with chroma
+            if not result.get('success') and detector == 'auto' and selected_detector != 'chroma':
+                log_info(f"{selected_detector} failed ({result.get('error', 'unknown')}), falling back to chroma")
+                chroma_service = self.detectors.get('chroma')
+                if chroma_service and chroma_service.is_available():
+                    chroma_dict = get_default_chord_dict('chroma')
+                    result = chroma_service.recognize_chords(audio_file_to_process, chroma_dict)
+                    selected_detector = 'chroma'
+                    chord_dict = chroma_dict
+
             # Add metadata
             result['file_size_mb'] = file_size_mb
             result['detector_selected'] = selected_detector
