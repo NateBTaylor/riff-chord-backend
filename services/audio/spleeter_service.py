@@ -160,6 +160,66 @@ class SpleeterService:
                     "processing_time": time.time() - start_time}
 
     # ------------------------------------------------------------------
+    # Replicate Demucs 4-stem (~$0.023, ~60s) — vocals + other
+    # ------------------------------------------------------------------
+
+    def _extract_stems_demucs_replicate(self, audio_path: str,
+                                        output_dir: Optional[str] = None) -> Dict[str, Any]:
+        """Full 4-stem separation via Replicate Demucs; downloads vocals + other."""
+        start_time = time.time()
+        temp_dir_created = False
+
+        if output_dir is None:
+            output_dir = tempfile.mkdtemp(prefix="demucs_stems_")
+            temp_dir_created = True
+
+        try:
+            from utils.replicate_utils import replicate_run_with_retry
+
+            log_info("Full 4-stem separation via Replicate Demucs...")
+
+            with open(audio_path, 'rb') as f:
+                output = replicate_run_with_retry(
+                    "cjwbw/demucs:25a173108cff36ef9f80f854c162d01df9e6528be175794b81158fa03836d953",
+                    input={"audio": f},
+                )
+
+            vocals_path = os.path.join(output_dir, "vocals.wav")
+            other_path = os.path.join(output_dir, "other.wav")
+
+            self._download_all_stems(output, {
+                "vocals": vocals_path,
+                "other": other_path,
+            })
+
+            processing_time = time.time() - start_time
+            log_info(f"Demucs 4-stem separation: {processing_time:.1f}s")
+
+            return {
+                "success": True,
+                "vocals_path": vocals_path,
+                "other_path": other_path,
+                "accompaniment_path": other_path,  # backward compat
+                "stems": {"vocals": vocals_path, "other": other_path},
+                "output_dir": output_dir,
+                "model_used": "htdemucs 4-stem (replicate)",
+                "processing_time": processing_time,
+                "temp_dir_created": temp_dir_created,
+            }
+
+        except Exception as e:
+            error_msg = f"Replicate Demucs 4-stem failed: {str(e)}"
+            log_error(error_msg)
+            if temp_dir_created and output_dir:
+                try:
+                    import shutil
+                    shutil.rmtree(output_dir)
+                except Exception:
+                    pass
+            return {"success": False, "error": error_msg,
+                    "processing_time": time.time() - start_time}
+
+    # ------------------------------------------------------------------
     # Local Demucs CPU (free, ~2-5min)
     # ------------------------------------------------------------------
 
@@ -342,8 +402,12 @@ class SpleeterService:
                     matched[stem_name] = (item, dest_path)
 
         # Fall back to positional matching for unmatched stems
-        # Spleeter 2-stem order: [vocals, accompaniment]
-        positional_map = {0: "vocals", 1: "accompaniment"}
+        if len(items) >= 4:
+            # Demucs 4-stem order: [drums, bass, other, vocals]
+            positional_map = {0: "drums", 1: "bass", 2: "other", 3: "vocals"}
+        else:
+            # Spleeter 2-stem order: [vocals, accompaniment]
+            positional_map = {0: "vocals", 1: "accompaniment"}
         for i, item in enumerate(items):
             pos_name = positional_map.get(i)
             if pos_name and pos_name in stem_destinations and pos_name not in matched:
@@ -364,10 +428,12 @@ class SpleeterService:
     def extract_stems(self, audio_path: str,
                       output_dir: Optional[str] = None) -> Dict[str, Any]:
         """
-        Extract both vocals and accompaniment stems in a single Spleeter call.
+        Extract stems for chord recognition and lyrics.
 
-        Returns dict with vocals_path, accompaniment_path, and stems dict.
-        Priority: Replicate Spleeter → Replicate Demucs.
+        Returns dict with vocals_path, accompaniment_path (and other_path
+        when Demucs is used).
+
+        Priority: Replicate Demucs 4-stem → Replicate Spleeter 2-stem → local Demucs.
         """
         start_time = time.time()
         temp_dir_created = False
@@ -377,6 +443,13 @@ class SpleeterService:
             temp_dir_created = True
 
         if self._check_replicate():
+            # --- Try Demucs 4-stem first (vocals + other) ---
+            result = self._extract_stems_demucs_replicate(audio_path, output_dir)
+            if result.get("success"):
+                return result
+            log_error(f"Demucs 4-stem failed, trying Spleeter 2-stem: {result.get('error')}")
+
+            # --- Fallback: Spleeter 2-stem (vocals + accompaniment) ---
             try:
                 from utils.replicate_utils import replicate_run_with_retry
 
@@ -413,13 +486,14 @@ class SpleeterService:
             except Exception as e:
                 log_error(f"Replicate Spleeter stems failed: {e}")
 
-        # Fallback: local Demucs (already returns both)
+        # Fallback: local Demucs (already returns both + other)
         if self._check_local():
             result = self.separate_audio(audio_path, output_dir=output_dir)
             if result.get("success"):
                 stems = result.get("stems", {})
                 result["vocals_path"] = stems.get("vocals")
                 result["accompaniment_path"] = stems.get("accompaniment")
+                result["other_path"] = stems.get("other")
             return result
 
         if temp_dir_created and output_dir:

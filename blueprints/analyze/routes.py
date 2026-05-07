@@ -108,7 +108,7 @@ def analyze():
             try:
                 stems_info = spleeter_service.extract_stems(temp_file_path)
                 if stems_info.get('success'):
-                    audio_for_chords = stems_info.get('accompaniment_path', temp_file_path)
+                    audio_for_chords = stems_info.get('other_path', stems_info.get('accompaniment_path', temp_file_path))
                     audio_for_lyrics = stems_info.get('vocals_path', temp_file_path)
                     log_info(f"Stems separated in {stems_info.get('processing_time', 0):.1f}s — "
                              f"chords on accompaniment, lyrics on vocals")
