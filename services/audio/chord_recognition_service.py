@@ -264,6 +264,15 @@ class ChordRecognitionService:
                     selected_detector = 'chroma'
                     chord_dict = chroma_dict
 
+            # Post-process: merge short filler chords into neighbors
+            if result.get('success') and result.get('chords'):
+                raw_count = len(result['chords'])
+                result['chords'] = self._merge_short_chords(result['chords'])
+                result['total_chords'] = len(result['chords'])
+                if len(result['chords']) < raw_count:
+                    log_info(f"Chord cleanup: {raw_count} → {len(result['chords'])} "
+                             f"(merged {raw_count - len(result['chords'])} short segments)")
+
             # Add metadata
             result['file_size_mb'] = file_size_mb
             result['detector_selected'] = selected_detector
@@ -308,6 +317,38 @@ class ChordRecognitionService:
                 "processing_time": time.time() - start_time
             }
     
+    @staticmethod
+    def _merge_short_chords(chords: List[Dict[str, Any]],
+                            min_duration: float = 0.3) -> List[Dict[str, Any]]:
+        """
+        Merge very short chord segments into their neighbors.
+
+        Short segments (< min_duration) are absorbed by the previous chord,
+        then consecutive identical chords are merged.
+        """
+        if not chords:
+            return chords
+
+        # Pass 1: absorb short segments into the previous chord
+        merged = [chords[0].copy()]
+        for chord in chords[1:]:
+            duration = chord["end"] - chord["start"]
+            if duration < min_duration and merged:
+                # Extend previous chord to cover this segment
+                merged[-1]["end"] = chord["end"]
+            else:
+                merged.append(chord.copy())
+
+        # Pass 2: merge consecutive identical chords
+        final = [merged[0]]
+        for chord in merged[1:]:
+            if chord["chord"] == final[-1]["chord"]:
+                final[-1]["end"] = chord["end"]
+            else:
+                final.append(chord)
+
+        return final
+
     def get_detector_info(self) -> Dict[str, Any]:
         """
         Get information about available detectors.

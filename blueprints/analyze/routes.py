@@ -12,7 +12,7 @@ import time
 import tempfile
 import traceback
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 from flask import Blueprint, request, jsonify, current_app
 from extensions import limiter
 from config import get_config
@@ -151,11 +151,11 @@ def analyze():
             except Exception as e:
                 log_error(f"Chord recognition failed: {e}")
 
-            # Wait up to 20s for lyrics with the initial response
+            # Wait up to 30s for lyrics (whisper usually finishes in ~3s)
             try:
-                lyrics_result = lyrics_future.result(timeout=20)
-            except Exception as e:
-                log_info(f"Lyrics not ready in 20s, continuing in background")
+                lyrics_result = lyrics_future.result(timeout=30)
+            except (TimeoutError, FuturesTimeoutError):
+                log_info("Lyrics not ready in 30s, continuing in background")
                 # Let lyrics finish in background and store result in Redis
                 job_service = current_app.extensions.get('job_service')
                 if job_service:
@@ -208,6 +208,8 @@ def analyze():
                     # while the background thread still needs them
                     temp_file_path = None
                     stems_info = None
+            except Exception as e:
+                log_error(f"Lyrics transcription failed: {e}")
 
             # Don't wait for still-running lyrics task to finish
             executor.shutdown(wait=False)
