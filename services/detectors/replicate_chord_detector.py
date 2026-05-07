@@ -20,7 +20,7 @@ class ReplicateChordDetectorService:
     Requires REPLICATE_API_TOKEN environment variable.
     """
 
-    MODEL_ID = "triadmusic/chord-detection-cnn-lstm:be95be03"
+    MODEL_ID = "triadmusic/chord-detection-cnn-lstm:be95be0303fd42000c413aec595922499f8b946d65416f31fb0034c2daf81f19"
 
     def __init__(self):
         self._available = None
