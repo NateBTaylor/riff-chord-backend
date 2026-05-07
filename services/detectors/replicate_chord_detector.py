@@ -9,6 +9,7 @@ import json
 import os
 import tempfile
 import time
+import requests
 from typing import Dict, Any, List, Optional
 from utils.logging import log_info, log_error, log_debug
 
@@ -100,30 +101,68 @@ class ReplicateChordDetectorService:
 
     def _parse_output(self, output) -> List[Dict[str, Any]]:
         """Parse Replicate model output into normalized chord list."""
+        log_info(f"Replicate chord output type: {type(output).__name__}")
+        log_info(f"Replicate chord output repr: {repr(output)[:500]}")
 
-        # Case 1: JSON string
-        if isinstance(output, str):
-            return self._parse_json_or_lab(output)
-
-        # Case 2: dict with chords key
-        if isinstance(output, dict):
-            if "chords" in output:
-                return self._normalize_chord_list(output["chords"])
-            # Might be the full result dict
-            return self._normalize_chord_list([output])
-
-        # Case 3: list of chord dicts
-        if isinstance(output, list):
-            return self._normalize_chord_list(output)
-
-        # Case 4: FileOutput — read content
-        if hasattr(output, 'read'):
-            content = output.read()
-            if isinstance(content, bytes):
-                content = content.decode('utf-8')
+        # Resolve to string content first
+        content = self._resolve_output_to_string(output)
+        if content:
+            log_info(f"Resolved chord content ({len(content)} chars): {content[:300]}")
             return self._parse_json_or_lab(content)
 
-        # Case 5: iterable (e.g. streaming output)
+        log_error(f"Could not resolve Replicate chord output to string")
+        return []
+
+    def _resolve_output_to_string(self, output) -> Optional[str]:
+        """Resolve any Replicate output format to a string."""
+
+        # URL string — download the file content
+        if isinstance(output, str) and output.startswith('http'):
+            log_info(f"Downloading chord output from URL: {output[:100]}")
+            try:
+                resp = requests.get(output, timeout=30)
+                resp.raise_for_status()
+                return resp.text
+            except Exception as e:
+                log_error(f"Failed to download chord output: {e}")
+                return None
+
+        # Plain string (JSON or lab content)
+        if isinstance(output, str):
+            return output
+
+        # FileOutput with url attribute — download it
+        if hasattr(output, 'url'):
+            url = str(output.url)
+            log_info(f"Downloading chord output from FileOutput.url: {url[:100]}")
+            try:
+                resp = requests.get(url, timeout=30)
+                resp.raise_for_status()
+                return resp.text
+            except Exception as e:
+                log_error(f"Failed to download chord FileOutput: {e}")
+                return None
+
+        # FileOutput with read() method
+        if hasattr(output, 'read'):
+            try:
+                content = output.read()
+                if isinstance(content, bytes):
+                    content = content.decode('utf-8')
+                return content
+            except Exception as e:
+                log_error(f"Failed to read chord FileOutput: {e}")
+                return None
+
+        # dict — serialize to JSON for parsing
+        if isinstance(output, dict):
+            return json.dumps(output)
+
+        # list — serialize to JSON for parsing
+        if isinstance(output, list):
+            return json.dumps(output)
+
+        # Iterable (streaming output) — collect chunks
         try:
             chunks = []
             for chunk in output:
@@ -131,15 +170,20 @@ class ReplicateChordDetectorService:
                     chunks.append(chunk.decode('utf-8'))
                 elif isinstance(chunk, str):
                     chunks.append(chunk)
-            content = ''.join(chunks)
-            if content:
-                return self._parse_json_or_lab(content)
+                elif hasattr(chunk, 'url'):
+                    # FileOutput item in a list — download it
+                    url = str(chunk.url) if hasattr(chunk, 'url') else str(chunk)
+                    if url.startswith('http'):
+                        resp = requests.get(url, timeout=30)
+                        resp.raise_for_status()
+                        return resp.text
+            if chunks:
+                return ''.join(chunks)
         except TypeError:
             pass
 
-        # Last resort: try string conversion
-        content = str(output)
-        return self._parse_json_or_lab(content)
+        # Last resort
+        return str(output)
 
     def _parse_json_or_lab(self, content: str) -> List[Dict[str, Any]]:
         """Parse content as JSON or tab-separated lab format."""
