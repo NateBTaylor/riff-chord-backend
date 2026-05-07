@@ -114,8 +114,8 @@ class ChordRecognitionService:
         """
         Automatically select the best detector based on availability and file size.
 
-        Priority: chroma (fast, accurate on clean Demucs stems)
-                  → replicate-cnn-lstm → chord-cnn-lstm → btc-sl.
+        Priority: chord-cnn-lstm (local, same accuracy as Replicate, no cold start)
+                  → chroma → replicate-cnn-lstm → btc-sl.
 
         Args:
             available_detectors: List of available detector names
@@ -124,17 +124,18 @@ class ChordRecognitionService:
         Returns:
             str: Selected detector name
         """
-        # Chroma — fast, accurate on clean Demucs "other" stem
+        # Local CNN-LSTM — same model as Replicate but no cold start / cost
+        if 'chord-cnn-lstm' in available_detectors and file_size_mb <= self.size_limits['chord-cnn-lstm']:
+            return 'chord-cnn-lstm'
+
+        # Chroma — fast fallback
         if 'chroma' in available_detectors:
             return 'chroma'
 
-        # Replicate GPU — best accuracy on raw audio
+        # Replicate GPU — accurate but has cold-start latency
         if 'replicate-cnn-lstm' in available_detectors:
             return 'replicate-cnn-lstm'
 
-        # Fallback to heavier local models
-        if 'chord-cnn-lstm' in available_detectors and file_size_mb <= self.size_limits['chord-cnn-lstm']:
-            return 'chord-cnn-lstm'
         if 'btc-sl' in available_detectors:
             return 'btc-sl'
 
