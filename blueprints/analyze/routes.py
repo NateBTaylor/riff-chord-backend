@@ -1,7 +1,9 @@
 """
 Combined analysis endpoint for Riff iOS app.
 
-Pipeline: beat detection → Demucs (vocals + other stems) → chord recognition (on other) + lyrics (on vocals) in parallel.
+Pipeline: beat detection → Spleeter (vocals stem) → whisper (lyrics) → chord recognition (on original audio).
+
+Replicate API calls are serialized to avoid 429 rate-limit collisions.
 """
 
 import gc
@@ -9,7 +11,6 @@ import os
 import time
 import tempfile
 import traceback
-from concurrent.futures import ThreadPoolExecutor
 from flask import Blueprint, request, jsonify, current_app
 from extensions import limiter
 from config import get_config
@@ -28,12 +29,15 @@ def analyze():
     """
     Combined analysis: beat detection + chord recognition + lyrics transcription.
 
-    Beat detection runs first (fast with librosa), then chord recognition and
-    lyrics transcription run in parallel to minimize total wall time.
+    Steps run sequentially to avoid Replicate 429 rate-limit collisions:
+    1. Beat detection (local librosa, ~2s)
+    2. Spleeter stem separation (Replicate, ~3s) — vocals for lyrics
+    3. Whisper lyrics transcription (Replicate, ~3s) — on vocals stem
+    4. Chord recognition (Replicate CNN-LSTM, ~6s) — on original audio
 
     Parameters:
     - file: Audio file (multipart/form-data)
-    - model: Chord model (default 'chord-cnn-lstm')
+    - model: Chord model (default 'auto')
     - detector: Beat detector (default 'librosa')
     - chord_dict: Chord dictionary (optional)
 
@@ -74,8 +78,8 @@ def analyze():
         if not beat_service:
             return jsonify({"error": "Beat detection service unavailable"}), 503
 
-        # --- Step 1: Beat detection (fast with librosa ~2-5s) ---
-        log_info("Step 1/3: Beat detection")
+        # --- Step 1: Beat detection (local librosa, ~2s) ---
+        log_info("Step 1/4: Beat detection")
         beat_result = None
         try:
             beat_result = beat_service.detect_beats(
@@ -92,22 +96,17 @@ def analyze():
 
         gc.collect()
 
-        # --- Step 2: Stem separation (Demucs: vocals + other) ---
-        chord_result = None
-        lyrics_result = None
-        stems_info = None
-        audio_for_chords = temp_file_path
+        # --- Step 2: Spleeter stem separation (Replicate, ~3s) ---
         audio_for_lyrics = temp_file_path
+        stems_info = None
 
         if spleeter_service and spleeter_service.is_available():
-            log_info("Step 2/4: Stem separation (vocals + accompaniment)")
+            log_info("Step 2/4: Stem separation (vocals for lyrics)")
             try:
                 stems_info = spleeter_service.extract_stems(temp_file_path)
                 if stems_info.get('success'):
-                    audio_for_chords = stems_info.get('accompaniment_path', temp_file_path)
                     audio_for_lyrics = stems_info.get('vocals_path', temp_file_path)
-                    log_info(f"Stems separated in {stems_info.get('processing_time', 0):.1f}s — "
-                             f"chords on accompaniment, lyrics on vocals")
+                    log_info(f"Stems separated in {stems_info.get('processing_time', 0):.1f}s")
                 else:
                     log_error(f"Stem separation failed, using full mix: {stems_info.get('error')}")
                     stems_info = None
@@ -115,49 +114,31 @@ def analyze():
                 log_error(f"Stem separation error: {e}")
                 stems_info = None
         else:
-            log_info("Step 2: Skipping stem separation (unavailable)")
+            log_info("Step 2/4: Skipping stem separation (unavailable)")
 
-        # --- Step 3+4: Chord recognition + lyrics transcription in parallel ---
-        def run_chords():
-            log_info("Step 3/4: Chord recognition" +
-                     (f" (on {('other' if stems_info and stems_info.get('other_path') else 'accompaniment')} stem)" if stems_info else " (on full mix)"))
-            return chord_service.recognize_chords(
-                file_path=audio_for_chords,
-                detector=model,
-                chord_dict=chord_dict,
-                force=False,
-                use_spleeter=False,  # separation already done
-            )
-
-        def run_lyrics():
-            """Transcribe lyrics on vocals stem (or full mix as fallback)."""
-            log_info("Step 4/4: Lyrics transcription" +
-                     (" (on vocals stem)" if stems_info else " (on full mix)"))
-            return lyrics_service.transcribe(audio_path=audio_for_lyrics)
-
+        # --- Step 3: Lyrics transcription (Replicate Whisper, ~3s) ---
+        lyrics_result = None
         if lyrics_service:
-            executor = ThreadPoolExecutor(max_workers=2)
-            chord_future = executor.submit(run_chords)
-            lyrics_future = executor.submit(run_lyrics)
-
-            # Wait for both — lyrics (~3s) always finishes before chords (~15s)
+            log_info("Step 3/4: Lyrics transcription" +
+                     (" (on vocals stem)" if stems_info else " (on full mix)"))
             try:
-                chord_result = chord_future.result(timeout=180)
-            except Exception as e:
-                log_error(f"Chord recognition failed: {e}")
-
-            try:
-                lyrics_result = lyrics_future.result(timeout=180)
+                lyrics_result = lyrics_service.transcribe(audio_path=audio_for_lyrics)
             except Exception as e:
                 log_error(f"Lyrics transcription failed: {e}")
 
-            executor.shutdown(wait=False)
-        else:
-            log_info("Step 2/2: Chord recognition (lyrics service unavailable)")
-            try:
-                chord_result = run_chords()
-            except Exception as e:
-                log_error(f"Chord recognition failed: {e}")
+        # --- Step 4: Chord recognition (Replicate CNN-LSTM on original audio, ~6s) ---
+        log_info("Step 4/4: Chord recognition (on original audio)")
+        chord_result = None
+        try:
+            chord_result = chord_service.recognize_chords(
+                file_path=temp_file_path,
+                detector=model,
+                chord_dict=chord_dict,
+                force=False,
+                use_spleeter=False,
+            )
+        except Exception as e:
+            log_error(f"Chord recognition failed: {e}")
 
         if not chord_result or not chord_result.get('success'):
             error = chord_result.get('error') if chord_result else 'Unknown'
