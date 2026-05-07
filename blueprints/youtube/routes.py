@@ -91,10 +91,12 @@ def extract_audio():
         }
 
         thumbnail_url = ''
+        canonical_url = ''
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             title = info.get('title', 'audio')
             thumbnail_url = info.get('thumbnail', '')
+            canonical_url = info.get('webpage_url', '')
             log_info(f"[YouTube] Downloaded: {title}")
 
         # Find the output file (yt-dlp may change extension after post-processing)
@@ -122,6 +124,8 @@ def extract_audio():
         )
         if thumbnail_url:
             response.headers['X-Thumbnail-URL'] = thumbnail_url
+        if canonical_url:
+            response.headers['X-Canonical-URL'] = canonical_url
         return response
 
     except Exception as e:
