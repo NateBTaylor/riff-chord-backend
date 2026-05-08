@@ -161,20 +161,30 @@ def _download_soundcloud(url: str, tmpdir: str) -> dict:
 
     # 6. Build prioritized list of transcodings to try
     ordered = []
-    # Prefer HLS AAC (new format)
+    # Priority 1: encrypted HLS AAC (cbc/ctr-encrypted-hls with mp4 — current SoundCloud format)
+    for t in transcodings:
+        fmt = t.get('format', {})
+        protocol = fmt.get('protocol', '')
+        if 'encrypted-hls' in protocol and 'mp4' in fmt.get('mime_type', ''):
+            ordered.append(('encrypted_hls_aac', t))
+    # Priority 2: plain HLS AAC
     for t in transcodings:
         fmt = t.get('format', {})
         if fmt.get('protocol') == 'hls' and 'mp4' in fmt.get('mime_type', ''):
             ordered.append(('hls_aac', t))
-    # Then progressive
+    # Priority 3: progressive
     for t in transcodings:
         fmt = t.get('format', {})
         if fmt.get('protocol') == 'progressive':
             ordered.append(('progressive', t))
-    # Then any remaining HLS
+    # Priority 4: any remaining HLS (including encrypted)
+    seen = {id(t) for _, t in ordered}
     for t in transcodings:
+        if id(t) in seen:
+            continue
         fmt = t.get('format', {})
-        if fmt.get('protocol') == 'hls' and 'mp4' not in fmt.get('mime_type', ''):
+        protocol = fmt.get('protocol', '')
+        if 'hls' in protocol:
             ordered.append(('hls_other', t))
 
     if not ordered:
