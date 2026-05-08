@@ -1,86 +1,37 @@
 """
 Audio extraction routes.
 
-Provides an endpoint that accepts a YouTube, TikTok, or Instagram URL,
-extracts audio via yt-dlp, and returns the audio file to the client.
+Provides an endpoint that accepts a YouTube, TikTok, Instagram, or SoundCloud
+URL, extracts audio via yt-dlp, and returns the audio file to the client.
 
-Uses bgutil-ytdlp-pot-provider to generate Proof-of-Origin tokens
-so YouTube doesn't block requests from server IPs.
+The bgutil-ytdlp-pot-provider pip package auto-registers as a yt-dlp plugin
+to generate Proof-of-Origin tokens for YouTube (requires Node.js at runtime).
 """
 
 import os
 import re
-import subprocess
 import tempfile
-import time
 import uuid
 from flask import Blueprint, request, jsonify, send_file
 from extensions import limiter
 from config import get_config
-from utils.logging import log_info, log_debug, log_error
+from utils.logging import log_info, log_debug
 
 youtube_bp = Blueprint('youtube', __name__, url_prefix='/api/youtube')
 
 config = get_config()
-
-# --- PO Token Server Management ---
-_pot_server_process = None
-_POT_SERVER_PORT = 4416
-
-
-def _ensure_pot_server():
-    """Start the bgutil PO token HTTP server if not already running."""
-    global _pot_server_process
-
-    # Already running?
-    if _pot_server_process and _pot_server_process.poll() is None:
-        return True
-
-    try:
-        # Check if bgutil server script is available
-        result = subprocess.run(
-            ['node', '-e', 'require("bgutil-ytdlp-pot-provider")'],
-            capture_output=True, timeout=5,
-        )
-        # Find the server script path
-        find_script = subprocess.run(
-            ['node', '-e',
-             'const p = require.resolve("bgutil-ytdlp-pot-provider/server/build/main.js");'
-             'process.stdout.write(p)'],
-            capture_output=True, timeout=5, text=True,
-        )
-        if find_script.returncode != 0:
-            log_info("[POT] bgutil server script not found, PO tokens unavailable")
-            return False
-
-        server_script = find_script.stdout.strip()
-        log_info(f"[POT] Starting PO token server on port {_POT_SERVER_PORT}")
-        _pot_server_process = subprocess.Popen(
-            ['node', server_script],
-            env={**os.environ, 'PORT': str(_POT_SERVER_PORT)},
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        time.sleep(2)  # Give server time to start
-        if _pot_server_process.poll() is not None:
-            log_error("[POT] Server exited immediately")
-            return False
-        log_info("[POT] PO token server started")
-        return True
-    except Exception as e:
-        log_error(f"[POT] Failed to start PO token server: {e}")
-        return False
 
 
 _SUPPORTED_URL_PATTERNS = [
     r'^https?://(www\.)?(youtube\.com|youtu\.be|m\.youtube\.com)/',
     r'^https?://(www\.|vm\.|vt\.|m\.)?tiktok\.com/',
     r'^https?://(www\.)?(instagram\.com|instagr\.am)/',
+    r'^https?://(www\.|m\.)?(soundcloud\.com|snd\.sc)/',
 ]
 
 
 def _is_supported_url(url: str) -> bool:
-    """Validate that the URL is from a supported platform (YouTube, TikTok, Instagram)."""
+    """Validate that the URL is from a supported platform."""
     return any(re.match(p, url) for p in _SUPPORTED_URL_PATTERNS)
 
 
@@ -88,7 +39,7 @@ def _is_supported_url(url: str) -> bool:
 @limiter.limit(config.get_rate_limit('heavy_processing'))
 def extract_audio():
     """
-    Extract audio from a YouTube, TikTok, or Instagram URL using yt-dlp.
+    Extract audio from a YouTube, TikTok, Instagram, or SoundCloud URL using yt-dlp.
 
     Request JSON:
         { "url": "https://..." }
@@ -106,7 +57,7 @@ def extract_audio():
         return jsonify({'error': 'Missing url parameter'}), 400
 
     if not _is_supported_url(url):
-        return jsonify({'error': 'URL must be from YouTube, TikTok, or Instagram'}), 400
+        return jsonify({'error': 'URL must be from YouTube, TikTok, Instagram, or SoundCloud'}), 400
 
     log_info(f"[AudioExtract] Extraction requested for: {url[:80]}")
 
@@ -116,14 +67,7 @@ def extract_audio():
     try:
         import yt_dlp
 
-        is_youtube = any(h in url for h in ('youtube.com', 'youtu.be'))
-
-        # Start PO token server for YouTube requests
-        if is_youtube:
-            _ensure_pot_server()
-
         ydl_opts = {
-            # For YouTube: prefer audio-only m4a; for TikTok/IG: accept any format
             'format': 'bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio/best',
             'outtmpl': output_template,
             'quiet': True,
@@ -131,11 +75,6 @@ def extract_audio():
             'extract_flat': False,
             'noplaylist': True,
             'socket_timeout': 30,
-            'extractor_args': {
-                'youtube': {
-                    'player_client': ['web'],
-                },
-            },
             'http_headers': {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
                 'Accept-Language': 'en-US,en;q=0.9',
