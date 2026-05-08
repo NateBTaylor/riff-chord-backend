@@ -81,7 +81,7 @@ class LyricsTranscriptionService:
             inputs = {
                 "audio": open(audio_path, 'rb'),
                 "timestamp": "word",
-                "batch_size": 64,
+                "batch_size": 24,
             }
             if language:
                 inputs["language"] = language
