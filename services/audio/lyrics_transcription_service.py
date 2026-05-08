@@ -120,7 +120,7 @@ class LyricsTranscriptionService:
             inputs = {
                 "audio": open(whisper_audio, 'rb'),
                 "timestamp": "word",
-                "batch_size": 24,
+                "batch_size": 4,
             }
             if language:
                 inputs["language"] = language
@@ -309,12 +309,18 @@ class LyricsTranscriptionService:
     def transcribe(self, audio_path: str, language: Optional[str] = None) -> Dict[str, Any]:
         """
         Transcribe lyrics. Tries Replicate GPU first, falls back to local CPU.
+
+        Local fallback is skipped when Replicate is configured because the
+        Railway container doesn't have enough RAM for longer audio and the
+        worker gets OOM-killed.
         """
         if self._check_replicate():
             result = self._transcribe_replicate(audio_path, language)
             if result.get("success"):
                 return result
-            log_error(f"Replicate Whisper failed, trying local: {result.get('error')}")
+            log_error(f"Replicate Whisper failed: {result.get('error')}")
+            # Don't fall back to local — it will OOM-kill the Railway worker
+            return result
 
         if self._check_local():
             return self._transcribe_local(audio_path, language)
