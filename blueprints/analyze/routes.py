@@ -93,7 +93,7 @@ def analyze():
         if not beat_result or not beat_result.get('success'):
             error = beat_result.get('error') if beat_result else 'Unknown'
             log_error(f"Beat detection failed: {error} — continuing with chord recognition")
-            beat_result = {"success": True, "beats": [], "bpm": 0.0, "duration": 0.0}
+            beat_result = {"success": True, "beats": [], "bpm": 120.0, "duration": 0.0}
 
         gc.collect()
 
