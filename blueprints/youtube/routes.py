@@ -127,59 +127,89 @@ def _download_soundcloud(url: str, tmpdir: str) -> dict:
         thumbnail_url = thumbnail_url.replace('-large.', '-t500x500.')
 
     track_auth = track_data.get('track_authorization', '')
-    log_info(f"[SoundCloud] Track: {title}, auth token: {'yes' if track_auth else 'no'}")
+    track_id = track_data.get('id')
+    log_info(f"[SoundCloud] Track: {title}, id: {track_id}, auth: {'yes' if track_auth else 'no'}")
 
-    # 4. Find HLS transcoding URL
+    # 4. Get client_id first (needed for API calls)
+    client_id = _extract_soundcloud_client_id(html)
+
+    # 5. Fetch fresh track data from API (hydration URLs can be stale)
     transcodings = track_data.get('media', {}).get('transcodings', [])
-    transcoding_url = None
+    if track_id:
+        try:
+            api_url = f"https://api-v2.soundcloud.com/tracks/{track_id}?client_id={client_id}"
+            api_resp = http_requests.get(api_url, headers=headers, timeout=10)
+            if api_resp.status_code == 200:
+                fresh_data = api_resp.json()
+                fresh_transcodings = fresh_data.get('media', {}).get('transcodings', [])
+                if fresh_transcodings:
+                    transcodings = fresh_transcodings
+                    log_info(f"[SoundCloud] Got fresh transcodings from API")
+                # Update track_auth if available
+                if fresh_data.get('track_authorization'):
+                    track_auth = fresh_data['track_authorization']
+            else:
+                log_info(f"[SoundCloud] API track fetch returned {api_resp.status_code}, using hydration data")
+        except Exception as e:
+            log_info(f"[SoundCloud] API track fetch failed: {e}, using hydration data")
 
-    # Prefer HLS AAC
+    # Log all available transcodings
+    for t in transcodings:
+        fmt = t.get('format', {})
+        log_info(f"[SoundCloud] Transcoding: {fmt.get('protocol')} {fmt.get('mime_type')} "
+                 f"preset={t.get('preset', '?')} quality={t.get('quality', '?')}")
+
+    # 6. Build prioritized list of transcodings to try
+    ordered = []
+    # Prefer HLS AAC (new format)
     for t in transcodings:
         fmt = t.get('format', {})
         if fmt.get('protocol') == 'hls' and 'mp4' in fmt.get('mime_type', ''):
-            transcoding_url = t.get('url')
-            log_info(f"[SoundCloud] Using HLS AAC transcoding")
-            break
+            ordered.append(('hls_aac', t))
+    # Then progressive
+    for t in transcodings:
+        fmt = t.get('format', {})
+        if fmt.get('protocol') == 'progressive':
+            ordered.append(('progressive', t))
+    # Then any remaining HLS
+    for t in transcodings:
+        fmt = t.get('format', {})
+        if fmt.get('protocol') == 'hls' and 'mp4' not in fmt.get('mime_type', ''):
+            ordered.append(('hls_other', t))
 
-    # Fall back to any HLS
-    if not transcoding_url:
-        for t in transcodings:
-            fmt = t.get('format', {})
-            if fmt.get('protocol') == 'hls':
-                transcoding_url = t.get('url')
-                log_info(f"[SoundCloud] Using HLS fallback transcoding")
-                break
+    if not ordered:
+        raise ValueError(f"No transcodings found. Raw: {transcodings}")
 
-    # Fall back to any progressive
-    if not transcoding_url:
-        for t in transcodings:
-            fmt = t.get('format', {})
-            if fmt.get('protocol') == 'progressive':
-                transcoding_url = t.get('url')
-                log_info(f"[SoundCloud] Using progressive transcoding")
-                break
+    # 7. Try each transcoding until one works
+    media_url = None
+    last_error = None
+    for label, t in ordered:
+        transcoding_url = t.get('url')
+        if not transcoding_url:
+            continue
+        try:
+            separator = '&' if '?' in transcoding_url else '?'
+            stream_api_url = f"{transcoding_url}{separator}client_id={client_id}"
+            if track_auth:
+                stream_api_url += f"&track_authorization={track_auth}"
+            log_info(f"[SoundCloud] Trying {label}: {transcoding_url[:80]}...")
 
-    if not transcoding_url:
-        raise ValueError(f"No suitable transcoding found. Available: "
-                         f"{[t.get('format') for t in transcodings]}")
-
-    # 5. Get client_id
-    client_id = _extract_soundcloud_client_id(html)
-
-    # 6. Fetch the actual stream URL
-    separator = '&' if '?' in transcoding_url else '?'
-    stream_api_url = f"{transcoding_url}{separator}client_id={client_id}"
-    if track_auth:
-        stream_api_url += f"&track_authorization={track_auth}"
-    log_info(f"[SoundCloud] Fetching stream URL...")
-
-    stream_resp = http_requests.get(stream_api_url, headers=headers, timeout=10)
-    stream_resp.raise_for_status()
-    stream_data = stream_resp.json()
-    media_url = stream_data.get('url')
+            stream_resp = http_requests.get(stream_api_url, headers=headers, timeout=10)
+            if stream_resp.status_code == 200:
+                stream_data = stream_resp.json()
+                media_url = stream_data.get('url')
+                if media_url:
+                    log_info(f"[SoundCloud] Got stream via {label}")
+                    break
+            else:
+                log_info(f"[SoundCloud] {label} returned HTTP {stream_resp.status_code}")
+                last_error = f"{label}: HTTP {stream_resp.status_code}"
+        except Exception as e:
+            log_info(f"[SoundCloud] {label} failed: {e}")
+            last_error = str(e)
 
     if not media_url:
-        raise ValueError("SoundCloud API did not return a stream URL")
+        raise ValueError(f"All transcodings failed. Last error: {last_error}")
 
     log_info(f"[SoundCloud] Got media URL: {media_url[:80]}...")
 
