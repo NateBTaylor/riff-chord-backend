@@ -126,7 +126,8 @@ def _download_soundcloud(url: str, tmpdir: str) -> dict:
     if thumbnail_url:
         thumbnail_url = thumbnail_url.replace('-large.', '-t500x500.')
 
-    log_info(f"[SoundCloud] Track: {title}")
+    track_auth = track_data.get('track_authorization', '')
+    log_info(f"[SoundCloud] Track: {title}, auth token: {'yes' if track_auth else 'no'}")
 
     # 4. Find HLS transcoding URL
     transcodings = track_data.get('media', {}).get('transcodings', [])
@@ -168,6 +169,8 @@ def _download_soundcloud(url: str, tmpdir: str) -> dict:
     # 6. Fetch the actual stream URL
     separator = '&' if '?' in transcoding_url else '?'
     stream_api_url = f"{transcoding_url}{separator}client_id={client_id}"
+    if track_auth:
+        stream_api_url += f"&track_authorization={track_auth}"
     log_info(f"[SoundCloud] Fetching stream URL...")
 
     stream_resp = http_requests.get(stream_api_url, headers=headers, timeout=10)
