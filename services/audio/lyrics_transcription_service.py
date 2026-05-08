@@ -8,6 +8,8 @@ Priority order:
 
 import json
 import os
+import subprocess
+import tempfile
 import time
 from typing import Dict, Any, Optional, List
 from utils.logging import log_info, log_error, log_debug
@@ -65,6 +67,38 @@ class LyricsTranscriptionService:
         return self._model
 
     # ------------------------------------------------------------------
+    # Audio preprocessing — downsample to 16kHz mono to reduce GPU memory
+    # ------------------------------------------------------------------
+
+    def _prepare_audio_for_whisper(self, audio_path: str,
+                                   max_duration: int = 600) -> Optional[str]:
+        """Convert audio to 16kHz mono WAV capped at max_duration seconds.
+
+        Returns path to a temp file (caller must delete), or None on failure.
+        """
+        try:
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
+            tmp.close()
+            cmd = [
+                'ffmpeg', '-y', '-i', audio_path,
+                '-ac', '1',             # mono
+                '-ar', '16000',         # 16 kHz (Whisper's native rate)
+                '-t', str(max_duration),  # cap duration
+                '-acodec', 'pcm_s16le',  # 16-bit PCM
+                tmp.name,
+            ]
+            subprocess.run(cmd, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=60, check=True)
+            size_mb = os.path.getsize(tmp.name) / (1024 * 1024)
+            log_info(f"Whisper audio prep: 16kHz mono WAV, {size_mb:.1f}MB")
+            return tmp.name
+        except Exception as e:
+            log_error(f"Audio prep failed, using original: {e}")
+            if os.path.exists(tmp.name):
+                os.unlink(tmp.name)
+            return None
+
+    # ------------------------------------------------------------------
     # Replicate incredibly-fast-whisper (~$0.0027, ~3s)
     # ------------------------------------------------------------------
 
@@ -72,14 +106,19 @@ class LyricsTranscriptionService:
                               language: Optional[str] = None) -> Dict[str, Any]:
         """Transcribe using Replicate GPU Whisper (large-v3, ~3s)."""
         start_time = time.time()
+        prepared_path = None
 
         try:
             from utils.replicate_utils import replicate_run_with_retry
 
             log_info(f"Transcribing via Replicate incredibly-fast-whisper: {audio_path}")
 
+            # Downsample to 16kHz mono to reduce GPU memory usage
+            prepared_path = self._prepare_audio_for_whisper(audio_path)
+            whisper_audio = prepared_path or audio_path
+
             inputs = {
-                "audio": open(audio_path, 'rb'),
+                "audio": open(whisper_audio, 'rb'),
                 "timestamp": "word",
                 "batch_size": 24,
             }
@@ -112,6 +151,9 @@ class LyricsTranscriptionService:
                 "lyrics": [],
                 "processing_time": round(time.time() - start_time, 1),
             }
+        finally:
+            if prepared_path and os.path.exists(prepared_path):
+                os.unlink(prepared_path)
 
     def _parse_replicate_output(self, output) -> List[Dict[str, Any]]:
         """Parse incredibly-fast-whisper output into word list."""
