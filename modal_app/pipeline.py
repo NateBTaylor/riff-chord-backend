@@ -432,14 +432,28 @@ class RiffPipeline:
 
             print(f"[analyze] Input audio: {len(audio_bytes) / 1024:.0f}KB")
 
+            # Pre-decode to 44.1kHz stereo WAV with ffmpeg. Skips librosa's
+            # audioread fallback (which decoded m4a in ~30s) and gives
+            # demucs its native format — both downstream consumers load
+            # this in < 100ms.
+            import subprocess
+            wav_path = os.path.join(workdir, "in.wav")
+            t_decode = time.time()
+            subprocess.run(
+                ["ffmpeg", "-y", "-loglevel", "error", "-i", in_path,
+                 "-ac", "2", "-ar", "44100", "-acodec", "pcm_s16le", wav_path],
+                check=True,
+            )
+            print(f"[analyze] Decode to WAV: {time.time() - t_decode:.1f}s")
+
             # Stage 1: demucs (GPU) || librosa beats (CPU)
-            # These are on different compute resources so they truly parallelize.
-            # Beats finishes in ~1-2s, demucs in ~3-5s, so the wall time is
-            # bounded by demucs.
+            # Different compute resources, true parallelism. Both read the
+            # decoded WAV; beats finishes in ~1-2s, demucs in ~3-5s, so
+            # demucs bounds the wall time.
             t0 = time.time()
             with ThreadPoolExecutor(max_workers=2) as pool:
-                fut_stems = pool.submit(self._separate_stems, in_path, workdir)
-                fut_beats = pool.submit(self._detect_beats, in_path)
+                fut_stems = pool.submit(self._separate_stems, wav_path, workdir)
+                fut_beats = pool.submit(self._detect_beats, wav_path)
                 stems = fut_stems.result()
                 beats_result = fut_beats.result()
             print(f"[analyze] Demucs+Beats (parallel): {time.time() - t0:.1f}s")
