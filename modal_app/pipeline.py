@@ -154,22 +154,40 @@ class RiffPipeline:
             for name in MODEL_NAMES
         ]
         os.chdir("/")
+
+        # ---- Warm librosa's numba JIT ----
+        # librosa.beat.beat_track relies on numba-compiled functions that
+        # take 10-30s to JIT-compile on first call. Running them here
+        # (pre-snapshot) bakes the compiled state into the Python process
+        # memory, which Modal captures in the CPU snapshot. Every restored
+        # container starts with librosa fully warmed up.
+        print("[setup] Warming librosa numba JIT...")
+        import wave
+        import librosa
+        warmup_wav = "/tmp/_riff_librosa_warmup.wav"
+        with wave.open(warmup_wav, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(22050)
+            # 2 seconds of barely-audible tone so beat_track has something
+            # non-degenerate to chew on (pure silence can shortcut).
+            import struct
+            samples = bytearray()
+            for i in range(22050 * 2):
+                samples.extend(struct.pack("<h", (i % 100) - 50))
+            wf.writeframes(bytes(samples))
+        y, sr = librosa.load(warmup_wav, sr=22050, mono=True)
+        _ = librosa.beat.beat_track(y=y, sr=sr)
+        print("[setup] librosa numba JIT warmed.")
+
         print("[setup] CPU-side load complete. Snapshot will be taken now.")
 
     @modal.enter(snap=False)
     def move_to_gpu(self):
         """Runs every container start (cold OR after snapshot restore).
-        Moves models from CPU memory to GPU AND warms up CUDA kernels.
-
-        CUDA kernel cache is NOT in the CPU memory snapshot, so on first
-        inference after restore PyTorch JIT-compiles every op (~30s for
-        demucs). We force that compilation here with dummy forward passes
-        so the user's first real analyze() call runs at warm speed.
+        Moves models from CPU memory to GPU. Whisper is re-instantiated
+        directly on GPU since CTranslate2's device is fixed at construction.
         """
-        import os
-        import tempfile
-        import time
-        import torch
         from faster_whisper import WhisperModel, BatchedInferencePipeline
 
         print("[gpu-init] Moving demucs to CUDA...")
@@ -182,42 +200,6 @@ class RiffPipeline:
         self.whisper_gpu = BatchedInferencePipeline(model=whisper_model)
         del self.whisper_cpu
 
-        # ----- CUDA kernel warmup -----
-        # Demucs: run apply_model on a 1-second silence tensor. Forces all
-        # the convolution + STFT kernels to compile.
-        print("[gpu-init] Warming demucs CUDA kernels...")
-        t = time.time()
-        from demucs.apply import apply_model
-        dummy = torch.zeros(1, 2, self.demucs_model.samplerate, device="cuda")
-        with torch.no_grad():
-            _ = apply_model(self.demucs_model, dummy, split=True,
-                            overlap=0.25, device="cuda")
-        print(f"[gpu-init] Demucs warm: {time.time() - t:.1f}s")
-
-        # Whisper: transcribe a 1-second silence WAV. Forces CTranslate2
-        # to build its kernels and the batched pipeline to allocate its
-        # GPU buffers.
-        print("[gpu-init] Warming whisper CUDA kernels...")
-        t = time.time()
-        try:
-            import wave
-            silence_path = os.path.join(tempfile.gettempdir(), "_riff_silence.wav")
-            with wave.open(silence_path, "wb") as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)
-                wf.setframerate(16000)
-                wf.writeframes(b"\x00\x00" * 16000)
-            _segs, _ = self.whisper_gpu.transcribe(
-                silence_path, language="en", beam_size=1, batch_size=4,
-                condition_on_previous_text=False,
-            )
-            # Iterate to actually run inference (transcribe is a generator).
-            list(_segs)
-        except Exception as e:
-            print(f"[gpu-init] Whisper warmup failed (non-fatal): {e}")
-        print(f"[gpu-init] Whisper warm: {time.time() - t:.1f}s")
-
-        # Chord nets warm themselves on first inference — defer.
         print("[gpu-init] Ready.")
 
     # ----------- Internal model wrappers -----------
