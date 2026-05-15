@@ -253,6 +253,13 @@ class ChordRecognitionService:
             # Run chord recognition
             result = detector_service.recognize_chords(audio_file_to_process, chord_dict)
 
+            # Treat success with empty chords as a failure (can happen if
+            # Replicate output download fails transiently)
+            if result.get('success') and not result.get('chords'):
+                log_error(f"{selected_detector} returned success but no chords — treating as failure")
+                result['success'] = False
+                result['error'] = result.get('error', 'No chords returned despite successful model run')
+
             # Fallback: if auto-selected detector failed, retry with chroma
             if not result.get('success') and detector == 'auto' and selected_detector != 'chroma':
                 log_info(f"{selected_detector} failed ({result.get('error', 'unknown')}), falling back to chroma")

@@ -1,9 +1,15 @@
 """
 Combined analysis endpoint for Riff iOS app.
 
-Pipeline: beat detection → Spleeter (vocals stem) → whisper (lyrics) → chord recognition (on original audio).
+Pipeline:
+    beats (local, ~2s)
+       → Spleeter (Replicate, ~3s warm)
+       → chord recognition  ┐
+       → whisper lyrics     ┘  run in parallel (~6s warm, dominated by chord)
 
-Replicate API calls are serialized to avoid 429 rate-limit collisions.
+Private Replicate Deployments (RIFF_DEPLOY_* env vars) carry their own
+warm pool, so we no longer need the sleep-between-calls workaround that
+existed when we hit shared public models.
 """
 
 import gc
@@ -11,6 +17,7 @@ import os
 import time
 import tempfile
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from flask import Blueprint, request, jsonify, current_app
 from extensions import limiter
 from config import get_config
@@ -29,11 +36,10 @@ def analyze():
     """
     Combined analysis: beat detection + chord recognition + lyrics transcription.
 
-    Steps run sequentially to avoid Replicate 429 rate-limit collisions:
+    Pipeline (warm path):
     1. Beat detection (local librosa, ~2s)
-    2. Spleeter stem separation (Replicate, ~3s) — vocals for lyrics
-    3. Whisper lyrics transcription (Replicate, ~3s) — on vocals stem
-    4. Chord recognition (Replicate CNN-LSTM, ~6s) — on original audio
+    2. Spleeter stem separation (Replicate deployment, ~3s)
+    3. Chord recognition + lyrics transcription run in parallel (~6s warm)
 
     Parameters:
     - file: Audio file (multipart/form-data)
@@ -102,7 +108,7 @@ def analyze():
         stems_info = None
 
         if spleeter_service and spleeter_service.is_available():
-            log_info("Step 2/4: Stem separation (vocals for lyrics)")
+            log_info("Step 2/3: Stem separation (vocals for lyrics)")
             try:
                 stems_info = spleeter_service.extract_stems(temp_file_path)
                 if stems_info.get('success'):
@@ -115,45 +121,44 @@ def analyze():
                 log_error(f"Stem separation error: {e}")
                 stems_info = None
         else:
-            log_info("Step 2/4: Skipping stem separation (unavailable)")
+            log_info("Step 2/3: Skipping stem separation (unavailable)")
 
-        # Brief pause between Replicate calls to avoid 429 rate limits
-        if stems_info:
-            log_info("Waiting 3s before Whisper to avoid Replicate rate limit...")
-            time.sleep(3)
+        # --- Step 3: Chord recognition || Whisper lyrics (parallel) ---
+        # Private deployments don't share the public rate-limit pool, so we
+        # can fire both at once. Worst-case wall time becomes max(chord, whisper)
+        # instead of sum(chord, whisper) + sleep delays.
+        log_info("Step 3/3: Chord recognition + lyrics (parallel)" +
+                 (" (lyrics on vocals stem)" if stems_info else " (lyrics on full mix)"))
 
-        # --- Step 3: Lyrics transcription (Replicate Whisper, ~3s) ---
-        lyrics_result = None
-        if lyrics_service:
-            log_info("Step 3/4: Lyrics transcription" +
-                     (" (on vocals stem)" if stems_info else " (on full mix)"))
+        def _run_chord():
             try:
-                lyrics_result = lyrics_service.transcribe(audio_path=audio_for_lyrics)
+                return chord_service.recognize_chords(
+                    file_path=temp_file_path,
+                    detector=model,
+                    chord_dict=chord_dict,
+                    force=False,
+                    use_spleeter=False,
+                )
+            except Exception as e:
+                log_error(f"Chord recognition failed: {e}")
+                return None
+
+        def _run_lyrics():
+            if not lyrics_service:
+                return None
+            try:
+                return lyrics_service.transcribe(audio_path=audio_for_lyrics)
             except Exception as e:
                 log_error(f"Lyrics transcription failed: {e}")
+                return None
 
-        # Brief pause between Replicate calls to avoid 429 rate limits
-        # Only sleep if a Replicate call actually ran above (Spleeter or Whisper)
-        ran_replicate = stems_info is not None or (lyrics_result and lyrics_result.get('success'))
-        if ran_replicate:
-            log_info("Waiting 5s before chord Replicate call to avoid rate limit...")
-            time.sleep(5)
-        else:
-            log_info("No prior Replicate calls — skipping rate-limit pause")
-
-        # --- Step 4: Chord recognition (Replicate CNN-LSTM on original audio, ~6s) ---
-        log_info("Step 4/4: Chord recognition (on original audio)")
         chord_result = None
-        try:
-            chord_result = chord_service.recognize_chords(
-                file_path=temp_file_path,
-                detector=model,
-                chord_dict=chord_dict,
-                force=False,
-                use_spleeter=False,
-            )
-        except Exception as e:
-            log_error(f"Chord recognition failed: {e}")
+        lyrics_result = None
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            chord_future = pool.submit(_run_chord)
+            lyrics_future = pool.submit(_run_lyrics)
+            chord_result = chord_future.result()
+            lyrics_result = lyrics_future.result()
 
         if not chord_result or not chord_result.get('success'):
             error = chord_result.get('error') if chord_result else 'Unknown'
@@ -214,3 +219,46 @@ def analyze():
                 log_debug(f"Cleaned up temp file: {temp_file_path}")
             except Exception as e:
                 log_error(f"Failed to clean up temp file {temp_file_path}: {e}")
+
+
+@analyze_bp.route('/api/warmup', methods=['POST', 'GET'])
+@limiter.limit("60/minute")
+def warmup():
+    """
+    Wake idle Replicate deployment containers before the user uploads audio.
+
+    iOS fires this when the import flow opens so the GPU is already booted
+    by the time analyze starts. We fire predictions in background threads
+    and return immediately (~50ms) — the actual warm-up happens on Replicate.
+
+    Replicate bills only for GPU run-time, not boot, and these empty-input
+    predictions fail validation before any GPU work happens, so warm-up is
+    effectively free.
+    """
+    from utils.replicate_utils import warmup_deployment
+
+    deploy_vars = [
+        "RIFF_DEPLOY_SPLEETER",
+        "RIFF_DEPLOY_CHORD",
+        "RIFF_DEPLOY_WHISPER",
+    ]
+    configured = [v for v in deploy_vars if os.environ.get(v)]
+    if not configured:
+        return jsonify({
+            "success": False,
+            "warmed": [],
+            "reason": "No RIFF_DEPLOY_* env vars set — running against public models",
+        }), 200
+
+    # Fire-and-forget: each warm-up takes 200-500ms to hand off to Replicate.
+    # We could block but the iOS client is already async; returning quick
+    # lets it move on.
+    pool = ThreadPoolExecutor(max_workers=len(configured))
+    for var in configured:
+        pool.submit(warmup_deployment, var)
+    pool.shutdown(wait=False)
+
+    return jsonify({
+        "success": True,
+        "warmed": configured,
+    }), 200

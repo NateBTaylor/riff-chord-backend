@@ -60,18 +60,32 @@ class ReplicateChordDetectorService:
         start_time = time.time()
 
         try:
-            from utils.replicate_utils import replicate_run_with_retry
+            from utils.replicate_utils import run_deployment_or_model
 
             log_info(f"Running Chord-CNN-LSTM via Replicate GPU on: {file_path}")
 
             with open(file_path, 'rb') as f:
-                output = replicate_run_with_retry(
+                output = run_deployment_or_model(
+                    "RIFF_DEPLOY_CHORD",
                     self.MODEL_ID,
                     input={"audio": f},
                 )
 
             chords = self._parse_output(output)
-            duration = chords[-1]["end"] if chords else 0.0
+
+            if not chords:
+                error_msg = "Replicate model returned output but chord parsing produced no results"
+                log_error(error_msg)
+                return {
+                    "success": False,
+                    "error": error_msg,
+                    "model_used": "chord-cnn-lstm (replicate)",
+                    "model_name": "Chord-CNN-LSTM (Replicate GPU)",
+                    "chord_dict": chord_dict,
+                    "processing_time": round(time.time() - start_time, 1),
+                }
+
+            duration = chords[-1]["end"]
             processing_time = time.time() - start_time
 
             log_info(f"Replicate chord detection: {len(chords)} chords in {processing_time:.1f}s")
@@ -122,16 +136,31 @@ class ReplicateChordDetectorService:
         URL for Replicate FileOutput objects, then download the content.
         """
         # Step 1: Try str(output) — for FileOutput this gives the URL
+        #         Retry up to 3 times to handle transient CDN/network issues
         try:
             output_url = str(output)
             if output_url.startswith('http'):
-                log_info(f"[chord-resolve] downloading from str(output) URL: "
-                         f"{output_url[:120]}")
-                resp = requests.get(output_url, timeout=30)
-                resp.raise_for_status()
-                log_info(f"[chord-resolve] downloaded {len(resp.text)} chars, "
-                         f"status={resp.status_code}")
-                return resp.text
+                last_err = None
+                for attempt in range(3):
+                    try:
+                        if attempt > 0:
+                            time.sleep(1.5 * attempt)
+                            log_info(f"[chord-resolve] retry #{attempt} downloading URL")
+                        else:
+                            log_info(f"[chord-resolve] downloading from str(output) URL: "
+                                     f"{output_url[:120]}")
+                        resp = requests.get(output_url, timeout=30)
+                        resp.raise_for_status()
+                        if resp.text.strip():
+                            log_info(f"[chord-resolve] downloaded {len(resp.text)} chars, "
+                                     f"status={resp.status_code}")
+                            return resp.text
+                        log_error(f"[chord-resolve] downloaded empty body (attempt {attempt})")
+                        last_err = "empty response body"
+                    except Exception as e:
+                        last_err = str(e)
+                        log_error(f"[chord-resolve] URL download attempt {attempt} failed: {e}")
+                log_error(f"[chord-resolve] all 3 URL download attempts failed: {last_err}")
         except Exception as e:
             log_error(f"[chord-resolve] str(output) URL download failed: {e}")
 

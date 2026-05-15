@@ -109,7 +109,7 @@ class LyricsTranscriptionService:
         prepared_path = None
 
         try:
-            from utils.replicate_utils import replicate_run_with_retry
+            from utils.replicate_utils import run_deployment_or_model
 
             log_info(f"Transcribing via Replicate incredibly-fast-whisper: {audio_path}")
 
@@ -125,7 +125,8 @@ class LyricsTranscriptionService:
             if language:
                 inputs["language"] = language
 
-            output = replicate_run_with_retry(
+            output = run_deployment_or_model(
+                "RIFF_DEPLOY_WHISPER",
                 "vaibhavs10/incredibly-fast-whisper:3ab86df6c8f54c11309d4d1f930ac292bad43ace52d10c80d87eb258b3c9f79c",
                 input=inputs,
             )
