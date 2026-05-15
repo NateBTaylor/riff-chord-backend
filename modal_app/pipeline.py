@@ -47,8 +47,8 @@ image = (
         "torchaudio==2.1.2",
         # Stem separation
         "demucs==4.0.1",
-        # Lyrics transcription
-        "faster-whisper==1.0.3",
+        # Lyrics transcription — 1.1.0+ adds BatchedInferencePipeline
+        "faster-whisper>=1.1.0",
         # Chord-CNN-LSTM deps
         "librosa==0.10.1",
         "h5py>=3.0",
