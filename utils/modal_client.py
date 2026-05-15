@@ -50,7 +50,10 @@ def analyze_audio(audio_bytes: bytes, chord_dict: str = "submission") -> Optiona
         log_info(f"Calling Modal {app_name}.{class_name}.{method_name} "
                  f"({len(audio_bytes) / 1024:.0f}KB)")
         t0 = time.time()
-        cls = modal.Cls.lookup(app_name, class_name)
+        # Modal renamed Cls.lookup -> Cls.from_name in newer SDKs (>=0.64).
+        # from_name returns a class reference; we instantiate it then call
+        # the named method via remote().
+        cls = modal.Cls.from_name(app_name, class_name)
         method = getattr(cls(), method_name)
         result = method.remote(audio_bytes, chord_dict)
         log_info(f"Modal call complete in {time.time() - t0:.1f}s")
