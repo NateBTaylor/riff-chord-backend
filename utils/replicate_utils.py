@@ -108,24 +108,48 @@ def run_deployment_or_model(deployment_env: str, fallback_model_id: str,
             time.sleep(wait)
 
 
+def _silence_wav_bytes() -> bytes:
+    """1-second 16kHz mono 16-bit PCM WAV containing only silence.
+
+    Used as keep-warm input — predict() runs to completion (and returns
+    quickly because there's no signal), keeping the autoscaler from
+    scaling the container down to zero.
+    """
+    import io
+    import wave
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(16000)
+        wf.writeframes(b"\x00\x00" * 16000)  # 1s of silence
+    return buf.getvalue()
+
+
+# Cache the silence bytes once at import time.
+_SILENCE_WAV = _silence_wav_bytes()
+
+
 def warmup_deployment(deployment_env: str) -> Optional[str]:
     """
-    Fire a no-op prediction against a deployment to wake an idle container.
+    Fire a real silence-audio prediction against a deployment to keep the
+    container warm. We use a tiny valid audio file (not empty input) so
+    predict() actually runs — Replicate's autoscaler only counts containers
+    serving real predictions as "active" and will scale them down otherwise.
 
-    Does not wait for completion — returns the prediction id (or None if
-    the env var isn't set or the call fails). Caller is responsible for
-    not blocking on the result.
+    Returns the prediction id (or None if the env var isn't set / call fails).
+    Does not wait for completion — caller should not block on the result.
     """
+    import io
     slug = os.environ.get(deployment_env)
     if not slug or "/" not in slug:
         return None
     try:
         import replicate
         deployment = replicate.deployments.get(slug)
-        # Empty input still triggers container boot — the model will fail
-        # validation but the container is now warm. Replicate bills only
-        # for actual GPU seconds, so a validation-failed call is free.
-        prediction = deployment.predictions.create(input={})
+        prediction = deployment.predictions.create(
+            input={"audio": io.BytesIO(_SILENCE_WAV)},
+        )
         log_info(f"Warmup fired for {slug} → prediction {prediction.id}")
         return prediction.id
     except Exception as e:
