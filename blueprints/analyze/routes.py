@@ -1,9 +1,17 @@
 """
 Combined analysis endpoint for Riff iOS app.
 
-Pipeline: beat detection → Spleeter (vocals stem) → whisper (lyrics) → chord recognition (on original audio).
+Two execution paths:
 
-Replicate API calls are serialized to avoid 429 rate-limit collisions.
+1. Modal (fast path)
+   When MODAL_APP_NAME is set, we send the audio to the riff-pipeline
+   Modal app which runs demucs + chord-cnn-lstm + faster-whisper in one
+   container. Memory snapshots make cold starts ~10-20s; warm ~10-15s.
+   Beat detection still runs locally (librosa, ~2s) in parallel.
+
+2. Replicate (fallback path)
+   Original serial pipeline: beats → spleeter → whisper → chord, with
+   sleep pauses between calls to dodge 429s on public models.
 """
 
 import gc
@@ -11,10 +19,12 @@ import os
 import time
 import tempfile
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from flask import Blueprint, request, jsonify, current_app
 from extensions import limiter
 from config import get_config
 from utils.logging import log_info, log_error, log_debug
+from utils import modal_client
 
 # Create blueprint
 analyze_bp = Blueprint('analyze', __name__)
@@ -79,7 +89,7 @@ def analyze():
             return jsonify({"error": "Beat detection service unavailable"}), 503
 
         # --- Step 1: Beat detection (local librosa, ~2s) ---
-        log_info("Step 1/4: Beat detection")
+        log_info("Step 1: Beat detection")
         beat_result = None
         try:
             beat_result = beat_service.detect_beats(
@@ -96,6 +106,40 @@ def analyze():
             beat_result = {"success": True, "beats": [], "bpm": 120.0, "duration": 0.0}
 
         gc.collect()
+
+        # --- Modal fast path ---
+        # If MODAL_APP_NAME is set, ship the whole pipeline to Modal in one
+        # call. demucs + chord-cnn-lstm + whisper all run in one container
+        # with memory snapshots, so cold starts are ~10-20s.
+        if modal_client.is_enabled():
+            log_info("Step 2 (Modal): combined demucs + chord + whisper")
+            with open(temp_file_path, 'rb') as f:
+                audio_bytes = f.read()
+            modal_result = modal_client.analyze_audio(
+                audio_bytes,
+                chord_dict=chord_dict or "submission",
+            )
+            if modal_result and modal_result.get('success'):
+                processing_time = time.time() - start_time
+                response = {
+                    "success": True,
+                    "chords": modal_result.get("chords", []),
+                    "beats": beat_result.get("beats", []),
+                    "bpm": beat_result.get("bpm", 0.0),
+                    "duration": modal_result.get("duration", beat_result.get("duration", 0.0)),
+                    "total_chords": len(modal_result.get("chords", [])),
+                    "model_used": "modal-combined",
+                    "chord_dict": chord_dict or "submission",
+                    "used_spleeter": True,
+                    "lyrics": modal_result.get("lyrics", []),
+                    "total_words": len(modal_result.get("lyrics", [])),
+                    "processing_time": round(processing_time, 1),
+                }
+                log_info(f"Modal pipeline complete: {response['total_chords']} chords, "
+                         f"{response['total_words']} lyrics words, "
+                         f"{response['processing_time']}s")
+                return jsonify(response)
+            log_error("Modal call failed or returned no success — falling back to Replicate")
 
         # --- Step 2: Spleeter stem separation (Replicate, ~3s) ---
         audio_for_lyrics = temp_file_path
