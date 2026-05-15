@@ -99,7 +99,11 @@ app = modal.App("riff-pipeline", image=image)
 @app.cls(
     gpu="T4",                    # 16GB VRAM — plenty for demucs+whisper+chord
     enable_memory_snapshot=True, # snapshot CPU state, restore on cold start
-    scaledown_window=600,        # stay warm 10 min after each call
+    # 60s scaledown: memory snapshots make cold restart cheap (~10-15s) so
+    # there's no reason to pay for long warm idle. Each unbilled minute of
+    # idle = ~$0.01 of T4 time we don't owe Modal. Drop to 60s and rely on
+    # snapshots for "warm enough" cold starts.
+    scaledown_window=60,
     timeout=600,                 # 10 min per analyze call (generous)
     min_containers=0,            # scale to zero when idle ($0 idle cost)
     max_containers=4,            # cap on parallel scale-out
@@ -228,9 +232,15 @@ class RiffPipeline:
         return {"vocals_path": vocals_path, "other_path": other_path}
 
     def _transcribe_lyrics(self, vocals_path: str) -> list[dict]:
-        """faster-whisper word-timestamped transcription on the vocals stem."""
+        """faster-whisper word-timestamped transcription on the vocals stem.
+
+        We pin language="en" because distil-large-v3 is English-only and
+        crashes with `max() arg is an empty sequence` if asked to detect
+        language. If we ever want multilingual we'd swap back to large-v3.
+        """
         segments, _info = self.whisper_gpu.transcribe(
             vocals_path,
+            language="en",
             word_timestamps=True,
             vad_filter=True,
             vad_parameters=dict(
