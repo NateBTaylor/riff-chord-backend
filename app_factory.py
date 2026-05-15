@@ -129,11 +129,15 @@ def _start_warmup_heartbeat() -> None:
                         warmup_deployment(var)
                     except Exception as e:
                         log_info(f"Heartbeat ping failed for {var}: {e}")
-            time.sleep(240)  # 4 min — under Replicate's ~5 min scaledown
+            # 2 min interval — the first deploy used 4 min but containers
+            # were still scaling down between pings (queue times of 11-17s
+            # on supposedly-warm spleeter). 2 min stays safely under any
+            # plausible scaledown window.
+            time.sleep(120)
 
     thread = threading.Thread(target=loop, daemon=True, name="warmup-heartbeat")
     thread.start()
-    log_info("Replicate heartbeat started (4 min interval)")
+    log_info("Replicate heartbeat started (2 min interval)")
 
 
 def register_blueprints(app: Flask, config) -> None:

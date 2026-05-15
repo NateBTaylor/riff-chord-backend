@@ -109,23 +109,28 @@ def run_deployment_or_model(deployment_env: str, fallback_model_id: str,
 
 
 def _ensure_silence_wav() -> str:
-    """Create a 1-second 16kHz mono 16-bit PCM silence WAV on disk and return
+    """Create a 3-second 16kHz mono 16-bit PCM silence WAV on disk and return
     its path. Written once and reused for all warmup calls.
 
+    Why 3 seconds: shorter clips (1s) were letting predict() finish in
+    milliseconds, so the autoscaler may have marked the container idle
+    immediately. 3 seconds gives the container enough work to register as
+    "active" while still being tiny (~96KB).
+
     Why on disk (not BytesIO): Replicate's Python SDK occasionally chokes on
-    pure in-memory file objects, especially for models that probe filename
-    or content-type. A real file path is the boring, reliable choice.
+    pure in-memory file objects for models that probe filename or
+    content-type. A real file path is the reliable choice.
     """
     import tempfile
     import wave
-    path = os.path.join(tempfile.gettempdir(), "riff_silence_1s.wav")
+    path = os.path.join(tempfile.gettempdir(), "riff_silence_3s.wav")
     if os.path.exists(path) and os.path.getsize(path) > 1000:
         return path
     with wave.open(path, "wb") as wf:
         wf.setnchannels(1)
         wf.setsampwidth(2)
         wf.setframerate(16000)
-        wf.writeframes(b"\x00\x00" * 16000)  # 1s of silence
+        wf.writeframes(b"\x00\x00" * (16000 * 3))  # 3s of silence
     return path
 
 
