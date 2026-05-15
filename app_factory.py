@@ -60,9 +60,80 @@ def create_app(config_name: Optional[str] = None) -> Flask:
     # Initialize service container
     init_services(app, config)
 
+    # Start background heartbeat that keeps Replicate deployments warm
+    _start_warmup_heartbeat()
+
     log_info("Flask application created successfully")
 
     return app
+
+
+def _start_warmup_heartbeat() -> None:
+    """Keep Replicate deployment containers warm with a background heartbeat.
+
+    Replicate scales deployments to zero after a few minutes of idle, and
+    cold-start is 1-3 minutes per model — unacceptable for our UX. A ping
+    every 4 min (under the ~5 min scaledown window) keeps containers alive.
+
+    Gated by HEARTBEAT_ENABLED env var so we can turn it off easily. Only
+    runs in the master Gunicorn worker (or single-process dev server) to
+    avoid 2× / 3× pings from worker forks.
+    """
+    import os
+    import threading
+    import time
+
+    if os.environ.get("HEARTBEAT_ENABLED", "1") != "1":
+        log_info("Replicate heartbeat disabled (HEARTBEAT_ENABLED != 1)")
+        return
+
+    # Skip in Gunicorn worker forks — only the master should run this.
+    # Gunicorn's pre-fork worker model means create_app() runs in each
+    # worker; we want one heartbeat across the whole pool. Detection
+    # is best-effort: GUNICORN_CMD_ARGS exists in workers but not master.
+    # Simpler: use a file lock based on a fixed path. Since Railway only
+    # runs a single instance for our backend, the second-worker dedupe
+    # via file lock is reliable.
+    lock_path = "/tmp/riff-heartbeat.lock"
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, str(os.getpid()).encode())
+        os.close(fd)
+    except FileExistsError:
+        log_info("Heartbeat already running in another worker — skipping")
+        return
+
+    deploy_vars = (
+        "RIFF_DEPLOY_SPLEETER",
+        "RIFF_DEPLOY_CHORD",
+        "RIFF_DEPLOY_WHISPER",
+    )
+    if not any(os.environ.get(v) for v in deploy_vars):
+        log_info("Heartbeat skipped (no RIFF_DEPLOY_* env vars set)")
+        try:
+            os.unlink(lock_path)
+        except OSError:
+            pass
+        return
+
+    def loop():
+        # Lazy import so this module stays import-clean for tests.
+        from utils.replicate_utils import warmup_deployment
+        # Wait 30s on first boot so the first user-request cold-start
+        # isn't competing with heartbeat for container startup.
+        time.sleep(30)
+        while True:
+            for var in deploy_vars:
+                if os.environ.get(var):
+                    try:
+                        warmup_deployment(var)
+                    except Exception as e:
+                        log_info(f"Heartbeat ping failed for {var}: {e}")
+            time.sleep(240)  # 4 min — under Replicate's ~5 min scaledown
+
+    thread = threading.Thread(target=loop, daemon=True, name="warmup-heartbeat")
+    thread.start()
+    log_info("Replicate heartbeat started (4 min interval)")
 
 
 def register_blueprints(app: Flask, config) -> None:
