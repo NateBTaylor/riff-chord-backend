@@ -88,8 +88,44 @@ def analyze():
         if not beat_service:
             return jsonify({"error": "Beat detection service unavailable"}), 503
 
-        # --- Step 1: Beat detection (local librosa, ~2s) ---
-        log_info("Step 1: Beat detection")
+        # --- Modal fast path ---
+        # When configured, Modal handles the entire pipeline including
+        # beat detection (parallel with demucs inside the container). We
+        # skip the local librosa step entirely on this path — saves ~2s
+        # round-trip.
+        if modal_client.is_enabled():
+            log_info("Modal path: combined beats + demucs + chord + whisper")
+            with open(temp_file_path, 'rb') as f:
+                audio_bytes = f.read()
+            modal_result = modal_client.analyze_audio(
+                audio_bytes,
+                chord_dict=chord_dict or "submission",
+            )
+            if modal_result and modal_result.get('success'):
+                processing_time = time.time() - start_time
+                response = {
+                    "success": True,
+                    "chords": modal_result.get("chords", []),
+                    "beats": modal_result.get("beats", []),
+                    "bpm": modal_result.get("bpm", 0.0),
+                    "duration": modal_result.get("duration", 0.0),
+                    "total_chords": len(modal_result.get("chords", [])),
+                    "model_used": "modal-combined",
+                    "chord_dict": chord_dict or "submission",
+                    "used_spleeter": True,
+                    "lyrics": modal_result.get("lyrics", []),
+                    "total_words": len(modal_result.get("lyrics", [])),
+                    "processing_time": round(processing_time, 1),
+                }
+                log_info(f"Modal pipeline complete: {response['total_chords']} chords, "
+                         f"{response['total_words']} lyrics words, "
+                         f"BPM {response['bpm']:.1f}, "
+                         f"{response['processing_time']}s")
+                return jsonify(response)
+            log_error("Modal call failed or returned no success — falling back to Replicate")
+
+        # --- Fallback path: local beats + Replicate chord/lyrics ---
+        log_info("Step 1: Beat detection (fallback)")
         beat_result = None
         try:
             beat_result = beat_service.detect_beats(
@@ -106,40 +142,6 @@ def analyze():
             beat_result = {"success": True, "beats": [], "bpm": 120.0, "duration": 0.0}
 
         gc.collect()
-
-        # --- Modal fast path ---
-        # If MODAL_APP_NAME is set, ship the whole pipeline to Modal in one
-        # call. demucs + chord-cnn-lstm + whisper all run in one container
-        # with memory snapshots, so cold starts are ~10-20s.
-        if modal_client.is_enabled():
-            log_info("Step 2 (Modal): combined demucs + chord + whisper")
-            with open(temp_file_path, 'rb') as f:
-                audio_bytes = f.read()
-            modal_result = modal_client.analyze_audio(
-                audio_bytes,
-                chord_dict=chord_dict or "submission",
-            )
-            if modal_result and modal_result.get('success'):
-                processing_time = time.time() - start_time
-                response = {
-                    "success": True,
-                    "chords": modal_result.get("chords", []),
-                    "beats": beat_result.get("beats", []),
-                    "bpm": beat_result.get("bpm", 0.0),
-                    "duration": modal_result.get("duration", beat_result.get("duration", 0.0)),
-                    "total_chords": len(modal_result.get("chords", [])),
-                    "model_used": "modal-combined",
-                    "chord_dict": chord_dict or "submission",
-                    "used_spleeter": True,
-                    "lyrics": modal_result.get("lyrics", []),
-                    "total_words": len(modal_result.get("lyrics", [])),
-                    "processing_time": round(processing_time, 1),
-                }
-                log_info(f"Modal pipeline complete: {response['total_chords']} chords, "
-                         f"{response['total_words']} lyrics words, "
-                         f"{response['processing_time']}s")
-                return jsonify(response)
-            log_error("Modal call failed or returned no success — falling back to Replicate")
 
         # --- Step 2: Spleeter stem separation (Replicate, ~3s) ---
         audio_for_lyrics = temp_file_path

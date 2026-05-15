@@ -229,6 +229,29 @@ class RiffPipeline:
 
         return {"vocals_path": vocals_path, "other_path": other_path}
 
+    def _detect_beats(self, audio_path: str) -> dict:
+        """Librosa beat detection. Runs on CPU so it parallelizes with
+        demucs (which is GPU-bound) and chord+whisper after.
+
+        Returns the same shape the backend route used to build itself.
+        """
+        import librosa
+
+        # 22050 Hz mono is the standard rate for beat tracking — small,
+        # fast, and accurate. Cap at 6 minutes so a sneaky-long song
+        # can't OOM the container.
+        y, sr = librosa.load(audio_path, sr=22050, mono=True, duration=360)
+        duration = float(librosa.get_duration(y=y, sr=sr))
+        tempo, beats = librosa.beat.beat_track(y=y, sr=sr)
+        beat_times = librosa.frames_to_time(beats, sr=sr).tolist()
+        return {
+            "beats": beat_times,
+            "downbeats": beat_times[::4],
+            "bpm": float(tempo),
+            "duration": duration,
+            "time_signature": "4/4",
+        }
+
     def _transcribe_lyrics(self, vocals_path: str) -> list[dict]:
         """faster-whisper word-timestamped transcription on the vocals stem.
 
@@ -409,12 +432,19 @@ class RiffPipeline:
 
             print(f"[analyze] Input audio: {len(audio_bytes) / 1024:.0f}KB")
 
-            # 1. Demucs (~3-8s on T4 for a 3-min song)
+            # Stage 1: demucs (GPU) || librosa beats (CPU)
+            # These are on different compute resources so they truly parallelize.
+            # Beats finishes in ~1-2s, demucs in ~3-5s, so the wall time is
+            # bounded by demucs.
             t0 = time.time()
-            stems = self._separate_stems(in_path, workdir)
-            print(f"[analyze] Demucs: {time.time() - t0:.1f}s")
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                fut_stems = pool.submit(self._separate_stems, in_path, workdir)
+                fut_beats = pool.submit(self._detect_beats, in_path)
+                stems = fut_stems.result()
+                beats_result = fut_beats.result()
+            print(f"[analyze] Demucs+Beats (parallel): {time.time() - t0:.1f}s")
 
-            # 2. Chord + Whisper in parallel
+            # Stage 2: chord recognition (on accompaniment) || whisper (on vocals)
             with ThreadPoolExecutor(max_workers=2) as pool:
                 t1 = time.time()
                 fut_chords = pool.submit(self._recognize_chords, stems["other_path"], chord_dict)
@@ -423,15 +453,22 @@ class RiffPipeline:
                 lyrics = fut_lyrics.result()
                 print(f"[analyze] Chord+Whisper (parallel): {time.time() - t1:.1f}s")
 
-        duration = chords[-1]["end"] if chords else 0.0
+        # Prefer chord-derived duration when chords are detected, otherwise
+        # fall back to librosa's measurement.
+        duration = chords[-1]["end"] if chords else beats_result["duration"]
         total = time.time() - t_start
         print(f"[analyze] Total: {total:.1f}s — "
-              f"{len(chords)} chords, {len(lyrics)} words")
+              f"{len(chords)} chords, {len(lyrics)} words, "
+              f"{len(beats_result['beats'])} beats, BPM {beats_result['bpm']:.1f}")
 
         return {
             "success": True,
             "chords": chords,
             "lyrics": lyrics,
+            "beats": beats_result["beats"],
+            "downbeats": beats_result["downbeats"],
+            "bpm": beats_result["bpm"],
+            "time_signature": beats_result["time_signature"],
             "duration": duration,
             "processing_time": round(total, 2),
         }
