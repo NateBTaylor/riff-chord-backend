@@ -74,11 +74,10 @@ image = (
 # Pre-download demucs + whisper weights into the image so they're part of
 # the snapshot (no runtime download on cold start).
 #
-# Whisper: we use distil-large-v3 (Systran's CTranslate2-converted build).
-# It's ~600MB vs large-v3's ~3GB and runs 2-3× faster with comparable
-# accuracy on song lyrics. The model id below is the official faster-whisper
-# distil port.
-WHISPER_MODEL = "Systran/faster-distil-whisper-large-v3"
+# Whisper: distil-medium.en is ~280MB (vs 600MB large-v3) and 2-3× faster
+# on T4. English-only — fine for our use case since we pin language="en"
+# anyway. Quality drop on song lyrics is minimal; large-v3 was overkill.
+WHISPER_MODEL = "Systran/faster-distil-whisper-medium.en"
 
 image = image.run_commands(
     # Demucs htdemucs weights
@@ -245,8 +244,9 @@ class RiffPipeline:
             vocals_path,
             language="en",
             word_timestamps=True,
-            batch_size=16,           # parallel chunks on GPU
-            beam_size=1,             # greedy decoding (2-3x faster than default beam=5)
+            batch_size=16,                       # parallel chunks on GPU
+            beam_size=1,                         # greedy decoding (2-3x faster than beam=5)
+            condition_on_previous_text=False,    # skip slow context-tracking step
             vad_filter=True,
             vad_parameters=dict(
                 min_silence_duration_ms=300,
