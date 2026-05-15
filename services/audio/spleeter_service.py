@@ -68,13 +68,12 @@ class SpleeterService:
             temp_dir_created = True
 
         try:
-            from utils.replicate_utils import run_deployment_or_model
+            from utils.replicate_utils import replicate_run_with_retry
 
             log_info("Separating vocals via Replicate Spleeter...")
 
             with open(audio_path, 'rb') as f:
-                output = run_deployment_or_model(
-                    "RIFF_DEPLOY_SPLEETER",
+                output = replicate_run_with_retry(
                     "soykertje/spleeter:cd128044253523c86abfd743dea680c88559ad975ccd72378c8433f067ab5d0a",
                     input={"audio": f},
                 )
@@ -126,8 +125,6 @@ class SpleeterService:
 
             log_info("Separating vocals via Replicate Demucs...")
 
-            # Demucs is the rare-fallback path — staying on the public model
-            # is fine here since we don't pay for a dedicated deployment.
             with open(audio_path, 'rb') as f:
                 output = replicate_run_with_retry(
                     "cjwbw/demucs:25a173108cff36ef9f80f854c162d01df9e6528be175794b81158fa03836d953",
@@ -448,7 +445,7 @@ class SpleeterService:
         if self._check_replicate():
             # --- Try Spleeter 2-stem first (fast: ~2-3s) ---
             try:
-                from utils.replicate_utils import run_deployment_or_model
+                from utils.replicate_utils import replicate_run_with_retry
 
                 log_info("Extracting both stems via Replicate Spleeter...")
 
@@ -456,8 +453,7 @@ class SpleeterService:
                 accompaniment_path = os.path.join(output_dir, "accompaniment.wav")
 
                 with open(audio_path, 'rb') as f:
-                    output = run_deployment_or_model(
-                        "RIFF_DEPLOY_SPLEETER",
+                    output = replicate_run_with_retry(
                         "soykertje/spleeter:cd128044253523c86abfd743dea680c88559ad975ccd72378c8433f067ab5d0a",
                         input={"audio": f},
                     )
