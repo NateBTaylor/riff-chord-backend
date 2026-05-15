@@ -49,8 +49,8 @@ image = (
         "demucs==4.0.1",
         # Lyrics transcription — 1.1.0+ adds BatchedInferencePipeline
         "faster-whisper>=1.1.0",
-        # Chord-CNN-LSTM deps
-        "librosa==0.10.1",
+        # Chord-CNN-LSTM deps — 0.10.2+ fixes scipy.signal.hann removed in scipy 1.13
+        "librosa>=0.10.2,<0.11",
         "h5py>=3.0",
         "pretty_midi>=0.2.9",
         "mir_eval>=0.7",
