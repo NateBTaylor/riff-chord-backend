@@ -73,12 +73,19 @@ image = (
 
 # Pre-download demucs + whisper weights into the image so they're part of
 # the snapshot (no runtime download on cold start).
+#
+# Whisper: we use distil-large-v3 (Systran's CTranslate2-converted build).
+# It's ~600MB vs large-v3's ~3GB and runs 2-3× faster with comparable
+# accuracy on song lyrics. The model id below is the official faster-whisper
+# distil port.
+WHISPER_MODEL = "Systran/faster-distil-whisper-large-v3"
+
 image = image.run_commands(
     # Demucs htdemucs weights
     "python -c \"from demucs.pretrained import get_model; get_model('htdemucs')\"",
-    # Faster-whisper large-v3 weights (CTranslate2-converted)
-    "python -c \"from faster_whisper import WhisperModel; "
-    "WhisperModel('large-v3', device='cpu', compute_type='int8')\"",
+    # Faster-whisper distil-large-v3 weights
+    f"python -c \"from faster_whisper import WhisperModel; "
+    f"WhisperModel('{WHISPER_MODEL}', device='cpu', compute_type='int8')\"",
 )
 
 
@@ -118,18 +125,32 @@ class RiffPipeline:
         # 2. Faster-Whisper — load to CPU first; will re-instantiate on GPU
         #    in post-snapshot enter. (CTranslate2 doesn't support .to("cuda")
         #    after construction; the device is baked in.)
-        print("[setup] Loading whisper large-v3 (CPU placeholder)...")
-        self.whisper_cpu = WhisperModel("large-v3", device="cpu", compute_type="int8")
+        print(f"[setup] Loading whisper ({WHISPER_MODEL}) on CPU placeholder...")
+        self.whisper_cpu = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
         self.whisper_gpu = None  # populated post-snapshot
 
-        # 3. Chord-CNN-LSTM — make its module importable, but don't run the
-        #    function yet (it loads weights lazily inside chord_recognition()).
-        #    We bake the directory into sys.path so the import works from
-        #    anywhere.
+        # 3. Chord-CNN-LSTM — pre-load all 5 ensemble nets so each analyze()
+        #    call doesn't re-instantiate them. The original chord_recognition
+        #    function builds 5 NetworkInterfaces per call, which prints
+        #    "moved to cuda" 5× per request and wastes a few seconds.
         chord_dir = "/root/chord_cnn_lstm"
         if chord_dir not in sys.path:
             sys.path.insert(0, chord_dir)
         self.chord_dir = chord_dir
+
+        # Importing chord_recognition has the side effect of resolving
+        # MODEL_NAMES (the 5 checkpoint paths). Use those to build cached nets.
+        os.chdir(chord_dir)  # so relative cache_data/ paths resolve
+        from chord_recognition import MODEL_NAMES  # noqa: E402
+        from chordnet_ismir_naive import ChordNet  # noqa: E402
+        from mir.nn.train import NetworkInterface  # noqa: E402
+
+        print(f"[setup] Loading {len(MODEL_NAMES)} chord ensemble nets on CPU...")
+        self.chord_nets = [
+            NetworkInterface(ChordNet(None), name, load_checkpoint=False)
+            for name in MODEL_NAMES
+        ]
+        os.chdir("/")
         print("[setup] CPU-side load complete. Snapshot will be taken now.")
 
     @modal.enter(snap=False)
@@ -143,14 +164,21 @@ class RiffPipeline:
         print("[gpu-init] Moving demucs to CUDA...")
         self.demucs_model.to("cuda")
 
-        print("[gpu-init] Re-instantiating whisper on CUDA...")
+        print(f"[gpu-init] Re-instantiating whisper ({WHISPER_MODEL}) on CUDA...")
         # WhisperModel can be re-created cheaply because the weights are
-        # already cached in /root/.cache/huggingface from the image build.
+        # already cached from the image build.
         self.whisper_gpu = WhisperModel(
-            "large-v3", device="cuda", compute_type="float16"
+            WHISPER_MODEL, device="cuda", compute_type="float16"
         )
         # Drop the CPU placeholder to free RAM.
         del self.whisper_cpu
+
+        # Chord ensemble nets stay on CPU — they migrate to CUDA inside
+        # NetworkInterface.inference() the first time it's called. The
+        # underlying model has a `.to("cuda")` baked into its forward path,
+        # which is why the original code printed "moved to cuda" 5× per
+        # call. Pre-loading them once means that migration only happens
+        # once per container, not once per request.
         print("[gpu-init] Ready.")
 
     # ----------- Internal model wrappers -----------
@@ -239,33 +267,75 @@ class RiffPipeline:
         return words
 
     def _recognize_chords(self, audio_path: str, chord_dict: str = "submission") -> list[dict]:
-        """Run Chord-CNN-LSTM on the accompaniment stem.
+        """Run Chord-CNN-LSTM on the accompaniment stem using the 5 cached
+        ensemble nets pre-loaded in load_on_cpu.
 
-        The model code expects to run from its own directory (it loads pkl
-        weight files via relative paths). We chdir into it, call the
-        chord_recognition() function which writes a .lab file, parse the
-        .lab back into our normalized format, and chdir back.
+        We bypass the original chord_recognition() wrapper because it
+        builds 5 NetworkInterfaces per call (which re-loads weights + moves
+        them to CUDA every single time). Here we replicate the same logic
+        but with the cached nets — saves ~3-5s per call and quiets the
+        "moved to cuda" spam.
         """
-        import sys
+        import numpy as np
 
-        # The model module path lives in /root/chord_cnn_lstm and was
-        # added to sys.path in load_on_cpu. Import lazily so we don't
-        # interfere with snapshot creation.
         original_cwd = os.getcwd()
         try:
             os.chdir(self.chord_dir)
-            from chord_recognition import chord_recognition  # noqa: E402
+            # All these imports resolve from /root/chord_cnn_lstm (in sys.path).
+            from mir import io, DataEntry  # noqa: E402
+            from extractors.cqt import CQTV2  # noqa: E402
+            from extractors.xhmm_ismir import XHMMDecoder  # noqa: E402
+            from io_new.chordlab_io import ChordLabIO  # noqa: E402
+            from settings import DEFAULT_SR, DEFAULT_HOP_LENGTH  # noqa: E402
 
-            lab_path = tempfile.mktemp(suffix=".lab")
-            success = chord_recognition(audio_path, lab_path, chord_dict)
-            if not success:
-                return []
-            chords = self._parse_lab(lab_path)
+            # Build the audio entry + CQT features (same as original)
+            entry = DataEntry()
+            entry.prop.set("sr", DEFAULT_SR)
+            entry.prop.set("hop_length", DEFAULT_HOP_LENGTH)
             try:
-                os.unlink(lab_path)
-            except OSError:
-                pass
-            return chords
+                entry.append_file(audio_path, io.MusicIO, "music")
+            except Exception:
+                import librosa
+                y, sr = librosa.load(audio_path, sr=DEFAULT_SR)
+                entry.music = y
+                entry.prop.set("sr", sr)
+            entry.append_extractor(CQTV2, "cqt")
+
+            # Inference with each cached net — no re-loading, no re-moving
+            # to CUDA. The first call per container does the GPU migration
+            # inside NetworkInterface; subsequent calls reuse it.
+            probs_list = []
+            for net in self.chord_nets:
+                try:
+                    probs_list.append(net.inference(entry.cqt))
+                except Exception as e:
+                    print(f"[chord] net {net} inference failed: {e}")
+            if not probs_list:
+                return []
+
+            # Average probabilities across the 5 nets
+            avg_probs = [
+                np.mean([p[i] for p in probs_list], axis=0)
+                for i in range(len(probs_list[0]))
+            ]
+
+            # HMM decode
+            template_file = os.path.join(
+                self.chord_dir, "data", f"{chord_dict}_chord_list.txt"
+            )
+            hmm = XHMMDecoder(template_file=template_file)
+            chordlab = hmm.decode_to_chordlab(entry, avg_probs, False)
+
+            # Normalize directly — no need to round-trip through a .lab file.
+            return [
+                {
+                    "start": round(float(c[0]), 3),
+                    "end": round(float(c[1]), 3),
+                    "chord": c[2],
+                    "confidence": 1.0,
+                }
+                for c in chordlab
+            ]
         finally:
             os.chdir(original_cwd)
 
