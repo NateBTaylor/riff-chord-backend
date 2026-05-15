@@ -108,26 +108,25 @@ def run_deployment_or_model(deployment_env: str, fallback_model_id: str,
             time.sleep(wait)
 
 
-def _silence_wav_bytes() -> bytes:
-    """1-second 16kHz mono 16-bit PCM WAV containing only silence.
+def _ensure_silence_wav() -> str:
+    """Create a 1-second 16kHz mono 16-bit PCM silence WAV on disk and return
+    its path. Written once and reused for all warmup calls.
 
-    Used as keep-warm input — predict() runs to completion (and returns
-    quickly because there's no signal), keeping the autoscaler from
-    scaling the container down to zero.
+    Why on disk (not BytesIO): Replicate's Python SDK occasionally chokes on
+    pure in-memory file objects, especially for models that probe filename
+    or content-type. A real file path is the boring, reliable choice.
     """
-    import io
+    import tempfile
     import wave
-    buf = io.BytesIO()
-    with wave.open(buf, "wb") as wf:
+    path = os.path.join(tempfile.gettempdir(), "riff_silence_1s.wav")
+    if os.path.exists(path) and os.path.getsize(path) > 1000:
+        return path
+    with wave.open(path, "wb") as wf:
         wf.setnchannels(1)
         wf.setsampwidth(2)
         wf.setframerate(16000)
         wf.writeframes(b"\x00\x00" * 16000)  # 1s of silence
-    return buf.getvalue()
-
-
-# Cache the silence bytes once at import time.
-_SILENCE_WAV = _silence_wav_bytes()
+    return path
 
 
 def warmup_deployment(deployment_env: str) -> Optional[str]:
@@ -140,18 +139,18 @@ def warmup_deployment(deployment_env: str) -> Optional[str]:
     Returns the prediction id (or None if the env var isn't set / call fails).
     Does not wait for completion — caller should not block on the result.
     """
-    import io
     slug = os.environ.get(deployment_env)
     if not slug or "/" not in slug:
+        log_info(f"Warmup skipped: {deployment_env} not set in env")
         return None
     try:
         import replicate
         deployment = replicate.deployments.get(slug)
-        prediction = deployment.predictions.create(
-            input={"audio": io.BytesIO(_SILENCE_WAV)},
-        )
-        log_info(f"Warmup fired for {slug} → prediction {prediction.id}")
+        silence_path = _ensure_silence_wav()
+        with open(silence_path, "rb") as f:
+            prediction = deployment.predictions.create(input={"audio": f})
+        log_info(f"Warmup fired for {deployment_env}={slug} → prediction {prediction.id}")
         return prediction.id
     except Exception as e:
-        log_error(f"Warmup failed for {slug}: {e}")
+        log_error(f"Warmup failed for {deployment_env}={slug}: {e}")
         return None
