@@ -64,6 +64,41 @@ def extract_audio():
     tmpdir = tempfile.mkdtemp(prefix='riff_yt_')
     output_template = os.path.join(tmpdir, f'{uuid.uuid4().hex}.%(ext)s')
 
+    # Fast path: for YouTube URLs, route through public Piped instances
+    # first. They handle the bot-detection-blocked youtube extraction on
+    # their side and hand us a fresh stream URL we can fetch directly.
+    # Falls through to yt-dlp if every Piped instance is down or blocked.
+    yt_host = (urlparse(url).hostname or '').lower()
+    is_youtube = yt_host in {'youtube.com', 'www.youtube.com',
+                              'm.youtube.com', 'youtu.be'}
+    if is_youtube:
+        try:
+            from services.youtube_piped import download_audio as piped_download
+            piped_path = piped_download(url, tmpdir)
+        except Exception as e:
+            log_info(f"[YouTube] Piped extractor errored ({e}) — falling through to yt-dlp")
+            piped_path = None
+        if piped_path and os.path.exists(piped_path) and os.path.getsize(piped_path) > 1000:
+            ext = os.path.splitext(piped_path)[1].lstrip('.')
+            mimetype = 'audio/mp4' if ext in ('m4a', 'mp4') else 'audio/webm' if ext == 'webm' else 'audio/mpeg'
+            log_info(f"[YouTube] Piped success: sending {ext} file "
+                     f"({os.path.getsize(piped_path) // 1024}KB)")
+            response = send_file(piped_path, mimetype=mimetype,
+                                 as_attachment=True, download_name=f'audio.{ext}')
+
+            # Schedule cleanup of the temp dir after send_file streams.
+            import threading as _th, time as _ti
+            def _cleanup():
+                _ti.sleep(10)
+                try:
+                    import shutil
+                    shutil.rmtree(tmpdir, ignore_errors=True)
+                except Exception:
+                    pass
+            _th.Thread(target=_cleanup, daemon=True).start()
+            return response
+        log_info("[YouTube] Piped path exhausted — falling through to yt-dlp")
+
     try:
         import yt_dlp
 
