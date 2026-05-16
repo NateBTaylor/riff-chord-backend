@@ -12,6 +12,7 @@ import os
 import re
 import tempfile
 import uuid
+from urllib.parse import urlparse
 from flask import Blueprint, request, jsonify, send_file
 from extensions import limiter
 from config import get_config
@@ -213,6 +214,33 @@ def fetch_metadata():
     if not _is_supported_url(url):
         return jsonify({'error': 'URL must be from YouTube, TikTok, or Instagram'}), 400
 
+    # Fast path: YouTube has its own free oEmbed endpoint that doesn't
+    # require auth or trigger bot detection. Returns title + author +
+    # thumbnail in ~150ms. Skips yt-dlp entirely for YouTube URLs.
+    host = (urlparse(url).hostname or '').lower()
+    if host in {'youtube.com', 'www.youtube.com', 'm.youtube.com', 'youtu.be'}:
+        try:
+            import requests as _requests
+            oembed_resp = _requests.get(
+                'https://www.youtube.com/oembed',
+                params={'url': url, 'format': 'json'},
+                timeout=8,
+            )
+            if oembed_resp.status_code == 200:
+                data = oembed_resp.json()
+                log_info(f"[Metadata] YouTube oEmbed: \"{data.get('title', '')[:50]}\"")
+                return jsonify({
+                    'title': data.get('title') or '',
+                    'artist': data.get('author_name') or '',
+                    'duration': 0,  # oEmbed doesn't include duration
+                    'thumbnail_url': data.get('thumbnail_url') or '',
+                    'webpage_url': url,
+                }), 200
+            log_info(f"[Metadata] oEmbed HTTP {oembed_resp.status_code} — "
+                     f"falling through to yt-dlp")
+        except Exception as e:
+            log_info(f"[Metadata] oEmbed failed: {e} — falling through to yt-dlp")
+
     try:
         import yt_dlp
 
@@ -222,9 +250,8 @@ def fetch_metadata():
             'skip_download': True,
             'noplaylist': True,
             'socket_timeout': 15,
-            # Same PoT-friendly client config as extract_audio. Without it
-            # YouTube returns "Sign in to confirm you're not a bot" and
-            # the iOS confirmation sheet shows no title/thumbnail prefill.
+            # PoT-friendly clients for TikTok/Instagram/IG (and the unlikely
+            # case where oEmbed fell through for YouTube).
             'extractor_args': {
                 'youtube': {
                     'player_client': ['web_safari', 'mweb', 'tv_embedded'],
