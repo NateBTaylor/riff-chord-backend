@@ -286,18 +286,50 @@ def _download_youtube_via_rapidapi(source_url: str, output_dir: str) -> Optional
         log_info(f"[rapidapi] no media URL in response: {list(body.keys())}")
         return None
 
+    # Many YouTube-MP3 services hot-link-protect their CDN files, so
+    # downloads without a matching Referer return 404. Send the API host
+    # as Referer to satisfy that. Also use a normal-looking browser UA
+    # since some CDNs reject the requests/python default UA.
+    media_headers = {
+        "User-Agent": IPHONE_UA,
+        "Referer": f"https://{host}/",
+        "Accept": "*/*",
+    }
+
     out_path = os.path.join(output_dir, "audio.mp3")
-    try:
-        stream = requests.get(media_url, timeout=60, stream=True)
-        if stream.status_code != 200:
-            log_info(f"[rapidapi] media HTTP {stream.status_code}")
-            return None
-        with open(out_path, "wb") as f:
-            for chunk in stream.iter_content(chunk_size=64 * 1024):
-                if chunk:
-                    f.write(chunk)
-    except Exception as e:
-        log_info(f"[rapidapi] media download failed: {e}")
+    import time as _t
+    last_status = 0
+    for attempt in range(3):
+        try:
+            stream = requests.get(media_url, headers=media_headers,
+                                  timeout=60, stream=True)
+            last_status = stream.status_code
+            # 200 = good. 404 sometimes resolves after a couple seconds
+            # because the file is still being transcoded on their side.
+            if stream.status_code == 200:
+                with open(out_path, "wb") as f:
+                    for chunk in stream.iter_content(chunk_size=64 * 1024):
+                        if chunk:
+                            f.write(chunk)
+                # File must actually have bytes — some services serve
+                # 0-byte files when the transcode failed silently.
+                if os.path.getsize(out_path) > 1000:
+                    break
+                log_info(f"[rapidapi] media file was 0 bytes (attempt {attempt + 1})")
+                try:
+                    os.unlink(out_path)
+                except OSError:
+                    pass
+            else:
+                log_info(f"[rapidapi] media HTTP {stream.status_code} "
+                         f"(attempt {attempt + 1}/3) — url: {media_url[:120]}")
+        except Exception as e:
+            log_info(f"[rapidapi] media download attempt {attempt + 1} failed: {e}")
+        if attempt < 2:
+            _t.sleep(2.0)
+    else:
+        # All attempts failed.
+        log_info(f"[rapidapi] giving up after 3 attempts; last status={last_status}")
         return None
 
     raw_title = (body.get("title") or "").strip()
