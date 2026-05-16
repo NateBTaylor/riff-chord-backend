@@ -41,6 +41,14 @@ RUN cd /opt \
     && npx tsc \
     && rm -rf /root/.npm /opt/bgutil-ytdlp-pot-provider/server/node_modules/.cache
 
+# Install Deno — required for yt-dlp's YouTube "n-challenge" signature
+# solver. The Python jsinterp fallback can't handle YouTube's recent
+# obfuscated JS, so without Deno we get "Signature solving failed" and
+# only storyboards come back. Deno is yt-dlp's recommended runtime per
+# https://github.com/yt-dlp/yt-dlp/wiki/EJS .
+RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh -s -- -y \
+    && /usr/local/bin/deno --version
+
 # Remove build tools to save space
 RUN apt-get purge -y build-essential git pkg-config && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/* /root/.cache/pip
