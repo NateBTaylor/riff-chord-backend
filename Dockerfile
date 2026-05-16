@@ -5,7 +5,7 @@ WORKDIR /app
 
 # Install system deps + build tools for madmom + Node.js for PO token provider
 RUN apt-get update && apt-get install -y \
-    curl build-essential libsndfile1-dev libsndfile1 ffmpeg git pkg-config \
+    curl build-essential libsndfile1-dev libsndfile1 ffmpeg git pkg-config unzip \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y nodejs \
     && rm -rf /var/lib/apt/lists/*
