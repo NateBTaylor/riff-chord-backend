@@ -205,6 +205,79 @@ def _run_yt_dlp(base_args: list[str], extra_args: list[str],
     return proc.stdout
 
 
+def _download_tiktok_via_tikwm(source_url: str, output_dir: str) -> Optional[DownloadResult]:
+    """Public TikTok downloader API. Returns a direct audio URL in one
+    request, avoiding yt-dlp's broken TikTok extractor entirely (which
+    requires `curl-cffi` impersonation we don't have installed).
+
+    Returns None on any failure so the caller can fall through to yt-dlp.
+    """
+    import requests
+    api_url = f"https://www.tikwm.com/api/?url={requests.utils.quote(source_url, safe='')}&hd=1"
+    headers = {
+        "User-Agent": IPHONE_UA,
+        "Accept": "application/json",
+    }
+    try:
+        resp = requests.get(api_url, headers=headers, timeout=10)
+    except Exception as e:
+        log_info(f"[tikwm] request failed: {e}")
+        return None
+    if resp.status_code != 200:
+        log_info(f"[tikwm] HTTP {resp.status_code}")
+        return None
+    try:
+        body = resp.json()
+    except Exception:
+        return None
+    if body.get("code") != 0 or not body.get("data"):
+        log_info(f"[tikwm] error: {body.get('msg', 'unknown')}")
+        return None
+
+    data = body["data"]
+    # Prefer audio-only `music` URL, fall back to no-watermark video `play`
+    media_url = data.get("music") or data.get("play")
+    if not media_url:
+        return None
+    if not media_url.startswith("http"):
+        media_url = "https://www.tikwm.com" + media_url
+    is_audio = (data.get("music") and media_url == data["music"])
+    ext = "mp3" if is_audio else "mp4"
+
+    # Stream the audio bytes to a temp file.
+    out_path = os.path.join(output_dir, f"audio.{ext}")
+    try:
+        stream = requests.get(media_url, headers=headers, timeout=60, stream=True)
+        if stream.status_code != 200:
+            log_info(f"[tikwm] media HTTP {stream.status_code}")
+            return None
+        with open(out_path, "wb") as f:
+            for chunk in stream.iter_content(chunk_size=64 * 1024):
+                if chunk:
+                    f.write(chunk)
+    except Exception as e:
+        log_info(f"[tikwm] media download failed: {e}")
+        return None
+
+    title_raw = (data.get("title") or "").strip()
+    title = _strip_hashtags_and_mentions(title_raw) if title_raw else None
+    author = data.get("author") or {}
+    artist = author.get("unique_id") or author.get("nickname")
+    thumbnail = data.get("cover") or data.get("origin_cover")
+
+    log_info(f"[tikwm] success — {ext} {os.path.getsize(out_path) // 1024}KB, "
+             f"title={title!r}")
+    return DownloadResult(
+        file_path=out_path,
+        extension=ext,
+        title=title,
+        artist=artist,
+        thumbnail_url=thumbnail,
+        canonical_url=source_url,
+        client_used="tikwm",
+    )
+
+
 def download(source_url: str, output_dir: str, timeout: int = 120) -> DownloadResult:
     """Download the best audio stream from any supported source URL.
     Tries multiple player_client values until one succeeds.
@@ -216,6 +289,15 @@ def download(source_url: str, output_dir: str, timeout: int = 120) -> DownloadRe
     is_youtube = host in {"youtube.com", "www.youtube.com",
                           "m.youtube.com", "youtu.be"}
     is_tiktok = "tiktok.com" in host
+
+    # Fast path: hit tikwm.com first for TikTok URLs. It's been reliable
+    # while yt-dlp's TikTok extractor has been broken (needs curl-cffi
+    # for TLS impersonation we don't have).
+    if is_tiktok:
+        result = _download_tiktok_via_tikwm(source_url, output_dir)
+        if result is not None:
+            return result
+        log_info("[tikwm] fell through, trying yt-dlp...")
 
     if is_youtube:
         attempts = _YOUTUBE_ATTEMPTS
