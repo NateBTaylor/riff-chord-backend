@@ -27,11 +27,19 @@ RUN pip install --no-cache-dir git+https://github.com/CPJKU/madmom
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install the bgutil PoT server (npm package) — the bgutil-ytdlp-pot-provider
-# pip plugin talks to this server over HTTP at 127.0.0.1:4416 to generate
-# Proof-of-Origin tokens. Without it, YouTube returns only thumbnail/image
-# formats for anonymous + authenticated requests alike.
-RUN npm install -g bgutil-ytdlp-pot-provider
+# Install the bgutil PoT server from source — it's NOT on npm; the
+# project ships only as a git repo. yt-dlp's bgutil-ytdlp-pot-provider
+# pip plugin (already installed above) talks to this server over HTTP
+# at 127.0.0.1:4416 to mint Proof-of-Origin tokens. Without them
+# YouTube returns only thumbnail formats even for authenticated requests.
+# Pinned to 1.3.1 for predictability.
+RUN cd /opt \
+    && git clone --depth 1 --branch 1.3.1 \
+        https://github.com/Brainicism/bgutil-ytdlp-pot-provider.git \
+    && cd bgutil-ytdlp-pot-provider/server \
+    && npm ci \
+    && npx tsc \
+    && rm -rf /root/.npm /opt/bgutil-ytdlp-pot-provider/server/node_modules/.cache
 
 # Remove build tools to save space
 RUN apt-get purge -y build-essential git pkg-config && apt-get autoremove -y \

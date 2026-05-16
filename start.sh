@@ -6,23 +6,19 @@
 # regardless of cookies / player_client choice.
 set -euo pipefail
 
-# Find the server binary installed by `npm install -g bgutil-ytdlp-pot-provider`.
-# Different npm versions / install paths put it in different places, so try
-# both PATH and the npm-global bin dir.
-POT_BIN="$(command -v bgutil-pot-server || true)"
-if [[ -z "$POT_BIN" ]]; then
-    POT_BIN="$(npm prefix -g 2>/dev/null)/bin/bgutil-pot-server"
-fi
+# bgutil PoT server is built from source into /opt/bgutil-ytdlp-pot-provider/server/build/main.js
+# (see Dockerfile). Launch it on 127.0.0.1:4416 — yt-dlp's bgutil HTTP
+# plugin auto-discovers it there.
+POT_SCRIPT="/opt/bgutil-ytdlp-pot-provider/server/build/main.js"
 
-if [[ -x "$POT_BIN" ]]; then
-    echo "[start] Launching PoT server: $POT_BIN --port 4416"
-    # Background, redirect output so it doesn't drown the gunicorn logs.
-    "$POT_BIN" --port 4416 > /tmp/bgutil-pot.log 2>&1 &
+if [[ -f "$POT_SCRIPT" ]]; then
+    echo "[start] Launching PoT server: node $POT_SCRIPT --port 4416"
+    node "$POT_SCRIPT" --port 4416 > /tmp/bgutil-pot.log 2>&1 &
     POT_PID=$!
 
     # Give it a couple seconds to bind the port. yt-dlp's first ping
     # otherwise races and fails on the very first request.
-    for _ in 1 2 3 4 5; do
+    for _ in 1 2 3 4 5 6 7 8; do
         if curl -fsS http://127.0.0.1:4416/ping > /dev/null 2>&1; then
             echo "[start] PoT server ready (pid $POT_PID)"
             break
@@ -30,9 +26,8 @@ if [[ -x "$POT_BIN" ]]; then
         sleep 0.5
     done
 else
-    echo "[start] WARNING: bgutil-pot-server binary not found. YouTube downloads"
-    echo "[start]          will fail until it's installed via 'npm install -g"
-    echo "[start]          bgutil-ytdlp-pot-provider' in the Dockerfile."
+    echo "[start] WARNING: PoT server script not found at $POT_SCRIPT —"
+    echo "[start]          YouTube downloads will return only thumbnails."
 fi
 
 echo "[start] Launching Gunicorn..."
