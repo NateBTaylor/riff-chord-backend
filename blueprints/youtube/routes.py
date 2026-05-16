@@ -90,275 +90,84 @@ def _youtube_cookies_path():
 @limiter.limit(config.get_rate_limit('heavy_processing'))
 def extract_audio():
     """
-    Extract audio from a YouTube, TikTok, or Instagram URL using yt-dlp.
+    Extract audio from a YouTube, TikTok, or Instagram URL.
+
+    Delegates to services.yt_dlp_runner which spawns yt-dlp as a
+    subprocess and iterates through multiple player_client values
+    (cycling ios → android → tv_embedded → mediaconnect → web_safari
+    for YouTube) until one returns playable audio. The PoT plugin
+    auto-registers per subprocess invocation.
 
     Request JSON:
         { "url": "https://..." }
 
     Returns:
-        Audio file (m4a/mp3) as binary response.
+        Audio file (m4a/mp3/webm) as binary response with
+        X-Thumbnail-URL and X-Canonical-URL headers.
     """
     if not request.is_json:
         return jsonify({'error': 'Request must be JSON'}), 400
 
     data = request.get_json()
-    url = data.get('url', '').strip()
-
+    url = (data.get('url') or '').strip()
     if not url:
         return jsonify({'error': 'Missing url parameter'}), 400
-
     if not _is_supported_url(url):
         return jsonify({'error': 'URL must be from YouTube, TikTok, or Instagram'}), 400
 
     log_info(f"[AudioExtract] Extraction requested for: {url[:80]}")
-
     tmpdir = tempfile.mkdtemp(prefix='riff_yt_')
-    output_template = os.path.join(tmpdir, f'{uuid.uuid4().hex}.%(ext)s')
-
-    # For YouTube URLs, only fall back to Piped when we don't have
-    # cookies configured. Cookies + yt-dlp is faster and more reliable
-    # than the public Piped instance chain (which has been mostly down).
-    yt_host = (urlparse(url).hostname or '').lower()
-    is_youtube = yt_host in {'youtube.com', 'www.youtube.com',
-                              'm.youtube.com', 'youtu.be'}
-    cookies_configured = bool(os.environ.get('YOUTUBE_COOKIES_TXT'))
-    if is_youtube and not cookies_configured:
-        try:
-            from services.youtube_piped import download_audio as piped_download
-            piped_path = piped_download(url, tmpdir)
-        except Exception as e:
-            log_info(f"[YouTube] Piped extractor errored ({e}) — falling through to yt-dlp")
-            piped_path = None
-        if piped_path and os.path.exists(piped_path) and os.path.getsize(piped_path) > 1000:
-            ext = os.path.splitext(piped_path)[1].lstrip('.')
-            mimetype = 'audio/mp4' if ext in ('m4a', 'mp4') else 'audio/webm' if ext == 'webm' else 'audio/mpeg'
-            log_info(f"[YouTube] Piped success: sending {ext} file "
-                     f"({os.path.getsize(piped_path) // 1024}KB)")
-            response = send_file(piped_path, mimetype=mimetype,
-                                 as_attachment=True, download_name=f'audio.{ext}')
-
-            # Schedule cleanup of the temp dir after send_file streams.
-            import threading as _th, time as _ti
-            def _cleanup():
-                _ti.sleep(10)
-                try:
-                    import shutil
-                    shutil.rmtree(tmpdir, ignore_errors=True)
-                except Exception:
-                    pass
-            _th.Thread(target=_cleanup, daemon=True).start()
-            return response
-        log_info("[YouTube] Piped path exhausted — falling through to yt-dlp")
 
     try:
-        import yt_dlp
+        from services.yt_dlp_runner import download as run_download, YtDlpError
+        result = run_download(url, tmpdir, timeout=120)
 
-        # Strategy: probe formats first across multiple player_client
-        # configs, log what we get, then pick the best audio format
-        # directly by ID. Bypasses yt-dlp's format selector entirely,
-        # which has been opaque and unreliable.
-        base_opts = {
-            'outtmpl': output_template,
-            'quiet': True,
-            'no_warnings': True,
-            'extract_flat': False,
-            'noplaylist': True,
-            'socket_timeout': 30,
-            'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-                'Accept-Language': 'en-US,en;q=0.9',
-            },
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'm4a',
-                'preferredquality': '128',
-            }],
-        }
+        ext = result.extension if result.extension in ('m4a', 'mp3', 'webm',
+                                                       'mp4', 'opus', 'ogg') else 'm4a'
+        mimetype = {
+            'm4a': 'audio/mp4',
+            'mp4': 'audio/mp4',
+            'mp3': 'audio/mpeg',
+            'webm': 'audio/webm',
+            'opus': 'audio/ogg',
+            'ogg': 'audio/ogg',
+        }.get(ext, 'audio/mp4')
 
-        cookies_path = _youtube_cookies_path()
-        if cookies_path:
-            base_opts['cookiefile'] = cookies_path
-            log_info("[YouTube] Using YOUTUBE_COOKIES_TXT for yt-dlp auth")
-
-        # Try several player_client combos in sequence. Different clients
-        # see different format menus on the same video; first one that
-        # returns ANY audio-capable format wins.
-        client_configs = (
-            ['ios', 'android', 'tv_embedded', 'web', 'mweb', 'web_safari']
-            if cookies_path else
-            ['web_safari', 'mweb', 'tv_embedded']
-        )
-
-        info = None
-        chosen_client = None
-        seen_storyboards_only = 0
-        for client in client_configs:
-            probe_opts = {**base_opts,
-                          'extractor_args': {'youtube': {
-                              'player_client': [client],
-                              # Tell yt-dlp to use formats even when PoT
-                              # verification is missing — sometimes the
-                              # storyboard-only response is because PoT
-                              # check failed silently.
-                              'formats': ['missing_pot'],
-                          }}}
-            try:
-                with yt_dlp.YoutubeDL(probe_opts) as ydl:
-                    probe = ydl.extract_info(url, download=False, process=False)
-                formats = probe.get('formats') or []
-                audio_formats = [
-                    f for f in formats
-                    if (f.get('acodec') and f.get('acodec') != 'none')
-                    and f.get('url')
-                ]
-                non_storyboard = [
-                    f for f in formats if (f.get('ext') or '').lower() != 'mhtml'
-                ]
-                summary = ", ".join(
-                    f"{f.get('format_id')}({f.get('ext')},{f.get('acodec') or '-'}/"
-                    f"{f.get('vcodec') or '-'})"
-                    for f in formats[:5]
-                )
-                log_info(f"[YouTube] client={client} → "
-                         f"{len(formats)} formats ({len(audio_formats)} usable audio): "
-                         f"[{summary}]")
-                if audio_formats:
-                    info = probe
-                    chosen_client = client
-                    break
-                if not non_storyboard:
-                    seen_storyboards_only += 1
-                    # If two clients in a row return storyboards-only,
-                    # YouTube has flagged this request — no client will
-                    # help. Bail fast rather than waste 20+ seconds.
-                    if seen_storyboards_only >= 2:
-                        log_info("[YouTube] Multiple clients returned storyboards-only — "
-                                 "stopping probe early. Cookies are likely stale or this "
-                                 "account is throttled.")
-                        break
-            except Exception as e:
-                log_info(f"[YouTube] client={client} probe failed: {str(e)[:250]}")
-                continue
-
-        if not info:
-            return jsonify({'error': 'All yt-dlp player clients failed to return audio formats. '
-                                     'YouTube may have invalidated the cookies — re-export them.'}), 500
-
-        # Pick the highest-bitrate audio-only stream (audio_formats sorted desc
-        # by abr / bitrate; fall back to first if no abr available).
-        audio_formats = [
-            f for f in info.get('formats', [])
-            if (f.get('acodec') and f.get('acodec') != 'none')
-            and f.get('url')
-        ]
-        # Prefer audio-only (vcodec=none), then by abr/bitrate
-        audio_only = [f for f in audio_formats if f.get('vcodec') == 'none']
-        target_list = audio_only or audio_formats
-        chosen = max(
-            target_list,
-            key=lambda f: (f.get('abr') or 0, f.get('tbr') or 0, f.get('filesize') or 0)
-        )
-        log_info(f"[YouTube] picked format {chosen.get('format_id')} "
-                 f"({chosen.get('ext')}, {chosen.get('abr')}kbps) via {chosen_client}")
-
-        # Now actually download with that specific format ID.
-        ydl_opts = {**base_opts,
-                    'format': chosen['format_id'],
-                    'extractor_args': {
-                        'youtube': {'player_client': [chosen_client]},
-                    }}
-
-        thumbnail_url = ''
-        canonical_url = ''
-
-        # Retry transient network errors (RemoteDisconnected, connection
-        # resets) before failing. TikTok in particular drops connections
-        # ~5% of the time; without retry, iOS falls through to its slow
-        # ~25s Cobalt fallback chain when a single retry would have
-        # succeeded immediately.
-        import time as _time
-        last_error = None
-        for attempt in range(3):
-            try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
-                title = info.get('title', 'audio')
-                thumbnail_url = info.get('thumbnail', '')
-                canonical_url = info.get('webpage_url', '')
-                log_info(f"[YouTube] Downloaded: {title}"
-                         + (f" (attempt {attempt + 1})" if attempt else ""))
-                last_error = None
-                break
-            except Exception as e:
-                last_error = e
-                error_str = str(e).lower()
-                # Only retry on transient network failures, not on
-                # permanent ones like 404/410 (DRM, removed, region-locked).
-                transient = any(token in error_str for token in (
-                    'connection aborted',
-                    'remotedisconnected',
-                    'connection reset',
-                    'timed out',
-                    'temporary failure',
-                    # YouTube bot-detection: the PoT provider sometimes
-                    # needs a second attempt to fetch a fresh token.
-                    "sign in to confirm",
-                    'confirm you',
-                    "you're not a bot",
-                ))
-                if not transient or attempt == 2:
-                    raise
-                wait = 0.5 * (2 ** attempt)  # 0.5s, 1s
-                log_info(f"[YouTube] Transient error on attempt {attempt + 1}, "
-                         f"retrying in {wait:.1f}s: {e}")
-                _time.sleep(wait)
-
-        # Find the output file
-        output_file = None
-        for f in os.listdir(tmpdir):
-            filepath = os.path.join(tmpdir, f)
-            if os.path.isfile(filepath) and os.path.getsize(filepath) > 1000:
-                output_file = filepath
-                break
-
-        if not output_file:
-            log_info("[YouTube] No output file found after yt-dlp download")
-            return jsonify({'error': 'Audio extraction failed'}), 500
-
-        ext = os.path.splitext(output_file)[1].lstrip('.')
-        mimetype = 'audio/mp4' if ext in ('m4a', 'mp4') else 'audio/mpeg'
-
-        log_info(f"[YouTube] Sending {ext} file ({os.path.getsize(output_file) // 1024}KB)")
+        log_info(f"[AudioExtract] Sending {ext} file "
+                 f"({os.path.getsize(result.file_path) // 1024}KB) "
+                 f"via client={result.client_used}")
 
         response = send_file(
-            output_file,
+            result.file_path,
             mimetype=mimetype,
             as_attachment=True,
             download_name=f'audio.{ext}',
         )
-        if thumbnail_url:
-            response.headers['X-Thumbnail-URL'] = thumbnail_url
-        if canonical_url:
-            response.headers['X-Canonical-URL'] = canonical_url
+        if result.thumbnail_url:
+            response.headers['X-Thumbnail-URL'] = result.thumbnail_url
+        if result.canonical_url:
+            response.headers['X-Canonical-URL'] = result.canonical_url
         return response
 
+    except YtDlpError as e:
+        log_info(f"[AudioExtract] yt-dlp failed: {e}")
+        return jsonify({'error': f'Audio extraction failed: {str(e)[:300]}'}), 502
     except Exception as e:
-        log_info(f"[YouTube] Extraction failed: {e}")
-        return jsonify({'error': f'Audio extraction failed: {str(e)}'}), 500
+        log_info(f"[AudioExtract] unexpected error: {e}")
+        return jsonify({'error': f'Audio extraction failed: {str(e)[:300]}'}), 500
 
     finally:
-        import threading
-        import time
-
-        def cleanup():
-            time.sleep(10)
+        import threading as _th, time as _ti
+        def _cleanup():
+            _ti.sleep(15)
             try:
                 import shutil
                 shutil.rmtree(tmpdir, ignore_errors=True)
             except Exception:
                 pass
+        _th.Thread(target=_cleanup, daemon=True).start()
 
-        threading.Thread(target=cleanup, daemon=True).start()
+
 
 
 @youtube_bp.route('/metadata', methods=['POST'])
