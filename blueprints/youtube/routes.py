@@ -130,14 +130,11 @@ def extract_audio():
     try:
         import yt_dlp
 
-        # Format selector: loosened to "any audio, else any best stream".
-        # The previous m4a-preferring expression returned no matches with
-        # the PoT-friendly player clients, which is what was causing the
-        # "Requested format is not available" error. The
-        # FFmpegExtractAudio postprocessor below transcodes whatever we
-        # get to m4a anyway.
-        ydl_opts = {
-            'format': 'bestaudio/best',
+        # Strategy: probe formats first across multiple player_client
+        # configs, log what we get, then pick the best audio format
+        # directly by ID. Bypasses yt-dlp's format selector entirely,
+        # which has been opaque and unreliable.
+        base_opts = {
             'outtmpl': output_template,
             'quiet': True,
             'no_warnings': True,
@@ -157,26 +154,70 @@ def extract_audio():
 
         cookies_path = _youtube_cookies_path()
         if cookies_path:
-            ydl_opts['cookiefile'] = cookies_path
+            base_opts['cookiefile'] = cookies_path
             log_info("[YouTube] Using YOUTUBE_COOKIES_TXT for yt-dlp auth")
-            # Even with cookies, the default `web` client requires PoT
-            # tokens to return formats — and bgutil-pot has been flaky.
-            # ios/android clients return direct audio URLs without any
-            # PoT / signature cipher dependency, and they accept cookies
-            # fine. tv_embedded is a final fallback.
-            ydl_opts['extractor_args'] = {
-                'youtube': {
-                    'player_client': ['ios', 'android', 'tv_embedded'],
-                },
-            }
-        else:
-            # No cookies — restrict to PoT-friendly clients so the
-            # bgutil-pot plugin can mint a token.
-            ydl_opts['extractor_args'] = {
-                'youtube': {
-                    'player_client': ['web_safari', 'mweb', 'tv_embedded'],
-                },
-            }
+
+        # Try several player_client combos in sequence. Different clients
+        # see different format menus on the same video; first one that
+        # returns ANY audio-capable format wins.
+        client_configs = (
+            ['ios', 'android', 'tv_embedded', 'web', 'mweb', 'web_safari']
+            if cookies_path else
+            ['web_safari', 'mweb', 'tv_embedded']
+        )
+
+        info = None
+        chosen_client = None
+        for client in client_configs:
+            probe_opts = {**base_opts, 'extractor_args': {
+                'youtube': {'player_client': [client]},
+            }}
+            try:
+                with yt_dlp.YoutubeDL(probe_opts) as ydl:
+                    probe = ydl.extract_info(url, download=False)
+                formats = probe.get('formats') or []
+                audio_formats = [
+                    f for f in formats
+                    if (f.get('acodec') and f.get('acodec') != 'none')
+                    and f.get('url')
+                ]
+                log_info(f"[YouTube] client={client} → "
+                         f"{len(formats)} formats, {len(audio_formats)} usable audio")
+                if audio_formats:
+                    info = probe
+                    chosen_client = client
+                    break
+            except Exception as e:
+                log_info(f"[YouTube] client={client} probe failed: {str(e)[:200]}")
+                continue
+
+        if not info:
+            return jsonify({'error': 'All yt-dlp player clients failed to return audio formats. '
+                                     'YouTube may have invalidated the cookies — re-export them.'}), 500
+
+        # Pick the highest-bitrate audio-only stream (audio_formats sorted desc
+        # by abr / bitrate; fall back to first if no abr available).
+        audio_formats = [
+            f for f in info.get('formats', [])
+            if (f.get('acodec') and f.get('acodec') != 'none')
+            and f.get('url')
+        ]
+        # Prefer audio-only (vcodec=none), then by abr/bitrate
+        audio_only = [f for f in audio_formats if f.get('vcodec') == 'none']
+        target_list = audio_only or audio_formats
+        chosen = max(
+            target_list,
+            key=lambda f: (f.get('abr') or 0, f.get('tbr') or 0, f.get('filesize') or 0)
+        )
+        log_info(f"[YouTube] picked format {chosen.get('format_id')} "
+                 f"({chosen.get('ext')}, {chosen.get('abr')}kbps) via {chosen_client}")
+
+        # Now actually download with that specific format ID.
+        ydl_opts = {**base_opts,
+                    'format': chosen['format_id'],
+                    'extractor_args': {
+                        'youtube': {'player_client': [chosen_client]},
+                    }}
 
         thumbnail_url = ''
         canonical_url = ''
