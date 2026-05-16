@@ -87,12 +87,43 @@ def extract_audio():
 
         thumbnail_url = ''
         canonical_url = ''
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            title = info.get('title', 'audio')
-            thumbnail_url = info.get('thumbnail', '')
-            canonical_url = info.get('webpage_url', '')
-            log_info(f"[YouTube] Downloaded: {title}")
+
+        # Retry transient network errors (RemoteDisconnected, connection
+        # resets) before failing. TikTok in particular drops connections
+        # ~5% of the time; without retry, iOS falls through to its slow
+        # ~25s Cobalt fallback chain when a single retry would have
+        # succeeded immediately.
+        import time as _time
+        last_error = None
+        for attempt in range(3):
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                title = info.get('title', 'audio')
+                thumbnail_url = info.get('thumbnail', '')
+                canonical_url = info.get('webpage_url', '')
+                log_info(f"[YouTube] Downloaded: {title}"
+                         + (f" (attempt {attempt + 1})" if attempt else ""))
+                last_error = None
+                break
+            except Exception as e:
+                last_error = e
+                error_str = str(e).lower()
+                # Only retry on transient network failures, not on
+                # permanent ones like 404/410 (DRM, removed, region-locked).
+                transient = any(token in error_str for token in (
+                    'connection aborted',
+                    'remotedisconnected',
+                    'connection reset',
+                    'timed out',
+                    'temporary failure',
+                ))
+                if not transient or attempt == 2:
+                    raise
+                wait = 0.5 * (2 ** attempt)  # 0.5s, 1s
+                log_info(f"[YouTube] Transient error on attempt {attempt + 1}, "
+                         f"retrying in {wait:.1f}s: {e}")
+                _time.sleep(wait)
 
         # Find the output file
         output_file = None
