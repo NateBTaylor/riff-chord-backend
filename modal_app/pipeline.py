@@ -98,11 +98,12 @@ app = modal.App("riff-pipeline", image=image)
 @app.cls(
     gpu="T4",                    # 16GB VRAM — plenty for demucs+whisper+chord
     enable_memory_snapshot=True, # snapshot CPU state, restore on cold start
-    # 60s scaledown: memory snapshots make cold restart cheap (~10-15s) so
-    # there's no reason to pay for long warm idle. Each unbilled minute of
-    # idle = ~$0.01 of T4 time we don't owe Modal. Drop to 60s and rely on
-    # snapshots for "warm enough" cold starts.
-    scaledown_window=60,
+    # 5s scaledown: snapshot restore is ~5-7s end-to-end, so paying for
+    # 60s of warm idle on every call was burning ~$0.01/call. With 5s
+    # we collapse the container almost immediately — back-to-back calls
+    # within 5s share the warm container, everything else cold-restores
+    # cheaply from snapshot. Drops per-call cost from ~$0.013 to ~$0.003.
+    scaledown_window=5,
     timeout=600,                 # 10 min per analyze call (generous)
     min_containers=0,            # scale to zero when idle ($0 idle cost)
     max_containers=4,            # cap on parallel scale-out
