@@ -205,6 +205,117 @@ def _run_yt_dlp(base_args: list[str], extra_args: list[str],
     return proc.stdout
 
 
+def _youtube_video_id(url: str) -> Optional[str]:
+    """Extract the 11-char YouTube video ID from any common URL shape."""
+    from urllib.parse import urlparse, parse_qs
+    p = urlparse(url)
+    host = (p.hostname or "").lower()
+    if "youtu.be" in host:
+        return p.path.lstrip("/").split("/")[0] or None
+    if "youtube.com" in host:
+        q = parse_qs(p.query)
+        if "v" in q and q["v"]:
+            return q["v"][0]
+        m = re.match(r"^/(?:shorts|embed|v)/([A-Za-z0-9_-]{11})", p.path)
+        if m:
+            return m.group(1)
+    return None
+
+
+def _download_youtube_via_rapidapi(source_url: str, output_dir: str) -> Optional[DownloadResult]:
+    """RapidAPI YouTube-to-MP3 fast path. Requires RAPIDAPI_KEY env var.
+    Returns None if the key isn't set or the API call fails — caller
+    falls through to yt-dlp / proxy instances.
+
+    Default host: youtube-mp36.p.rapidapi.com (a "YouTube to MP3"
+    service on RapidAPI, generous free tier ~500 calls/month).
+    Override by setting RAPIDAPI_YT_HOST.
+    """
+    import requests
+    api_key = os.environ.get("RAPIDAPI_KEY")
+    if not api_key:
+        return None
+
+    host = os.environ.get("RAPIDAPI_YT_HOST", "youtube-mp36.p.rapidapi.com")
+    video_id = _youtube_video_id(source_url)
+    if not video_id:
+        log_info("[rapidapi] couldn't parse YouTube video ID")
+        return None
+
+    api_url = f"https://{host}/dl?id={video_id}"
+    headers = {
+        "X-RapidAPI-Key": api_key,
+        "X-RapidAPI-Host": host,
+    }
+    try:
+        resp = requests.get(api_url, headers=headers, timeout=15)
+    except Exception as e:
+        log_info(f"[rapidapi] request failed: {e}")
+        return None
+
+    if resp.status_code != 200:
+        log_info(f"[rapidapi] HTTP {resp.status_code}: {resp.text[:200]}")
+        return None
+    try:
+        body = resp.json()
+    except Exception:
+        return None
+
+    # Most YouTube-MP3 RapidAPIs return one of:
+    #   { "status": "ok",  "link": "https://...", "title": "..." }
+    #   { "status": "processing", ... }  — they're transcoding, retry in a few sec
+    #   { "status": "fail", "msg": "..." }
+    status = (body.get("status") or "").lower()
+    if status != "ok":
+        # Some endpoints take a few seconds to transcode — try one short retry.
+        if status == "processing":
+            import time as _t
+            _t.sleep(3)
+            try:
+                resp = requests.get(api_url, headers=headers, timeout=15)
+                body = resp.json()
+                status = (body.get("status") or "").lower()
+            except Exception:
+                pass
+        if status != "ok":
+            log_info(f"[rapidapi] status={status!r} msg={body.get('msg')!r}")
+            return None
+
+    media_url = body.get("link") or body.get("dlink") or body.get("url")
+    if not media_url:
+        log_info(f"[rapidapi] no media URL in response: {list(body.keys())}")
+        return None
+
+    out_path = os.path.join(output_dir, "audio.mp3")
+    try:
+        stream = requests.get(media_url, timeout=60, stream=True)
+        if stream.status_code != 200:
+            log_info(f"[rapidapi] media HTTP {stream.status_code}")
+            return None
+        with open(out_path, "wb") as f:
+            for chunk in stream.iter_content(chunk_size=64 * 1024):
+                if chunk:
+                    f.write(chunk)
+    except Exception as e:
+        log_info(f"[rapidapi] media download failed: {e}")
+        return None
+
+    raw_title = (body.get("title") or "").strip()
+    title = _strip_hashtags_and_mentions(raw_title) if raw_title else None
+
+    log_info(f"[rapidapi] success — mp3 {os.path.getsize(out_path) // 1024}KB, "
+             f"host={host}, title={title!r}")
+    return DownloadResult(
+        file_path=out_path,
+        extension="mp3",
+        title=title,
+        artist=None,  # most YT-MP3 APIs don't return uploader; oEmbed handles this
+        thumbnail_url=None,
+        canonical_url=source_url,
+        client_used=f"rapidapi:{host.split('.')[0]}",
+    )
+
+
 def _download_tiktok_via_tikwm(source_url: str, output_dir: str) -> Optional[DownloadResult]:
     """Public TikTok downloader API. Returns a direct audio URL in one
     request, avoiding yt-dlp's broken TikTok extractor entirely (which
@@ -298,6 +409,17 @@ def download(source_url: str, output_dir: str, timeout: int = 120) -> DownloadRe
         if result is not None:
             return result
         log_info("[tikwm] fell through, trying yt-dlp...")
+
+    # Fast path: RapidAPI YouTube-to-MP3 service first for YouTube URLs.
+    # When RAPIDAPI_KEY is set, this skips the entire yt-dlp/proxy chain
+    # and returns audio in 3-8s instead of the 30-90s the free path takes.
+    # Falls through to yt-dlp + Invidious chain if the key isn't set or
+    # the API call fails.
+    if is_youtube:
+        result = _download_youtube_via_rapidapi(source_url, output_dir)
+        if result is not None:
+            return result
+        log_info("[rapidapi] fell through, trying yt-dlp...")
 
     if is_youtube:
         attempts = _YOUTUBE_ATTEMPTS
