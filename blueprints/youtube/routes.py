@@ -191,14 +191,17 @@ def extract_audio():
 
         info = None
         chosen_client = None
+        seen_storyboards_only = 0
         for client in client_configs:
-            # process=False bypasses yt-dlp's format selector entirely.
-            # That selector was raising "Requested format is not available"
-            # during the probe phase, masking whether formats actually
-            # existed at all. With process=False we get the raw extractor
-            # output, no selector applied.
             probe_opts = {**base_opts,
-                          'extractor_args': {'youtube': {'player_client': [client]}}}
+                          'extractor_args': {'youtube': {
+                              'player_client': [client],
+                              # Tell yt-dlp to use formats even when PoT
+                              # verification is missing — sometimes the
+                              # storyboard-only response is because PoT
+                              # check failed silently.
+                              'formats': ['missing_pot'],
+                          }}}
             try:
                 with yt_dlp.YoutubeDL(probe_opts) as ydl:
                     probe = ydl.extract_info(url, download=False, process=False)
@@ -208,8 +211,9 @@ def extract_audio():
                     if (f.get('acodec') and f.get('acodec') != 'none')
                     and f.get('url')
                 ]
-                # Dump first 3 format IDs + extras so we can see if formats
-                # are present but unsuitable, vs totally absent.
+                non_storyboard = [
+                    f for f in formats if (f.get('ext') or '').lower() != 'mhtml'
+                ]
                 summary = ", ".join(
                     f"{f.get('format_id')}({f.get('ext')},{f.get('acodec') or '-'}/"
                     f"{f.get('vcodec') or '-'})"
@@ -222,6 +226,16 @@ def extract_audio():
                     info = probe
                     chosen_client = client
                     break
+                if not non_storyboard:
+                    seen_storyboards_only += 1
+                    # If two clients in a row return storyboards-only,
+                    # YouTube has flagged this request — no client will
+                    # help. Bail fast rather than waste 20+ seconds.
+                    if seen_storyboards_only >= 2:
+                        log_info("[YouTube] Multiple clients returned storyboards-only — "
+                                 "stopping probe early. Cookies are likely stale or this "
+                                 "account is throttled.")
+                        break
             except Exception as e:
                 log_info(f"[YouTube] client={client} probe failed: {str(e)[:250]}")
                 continue
