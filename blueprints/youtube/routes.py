@@ -289,8 +289,30 @@ def fetch_metadata():
             or ''
         )
 
+        # Title resolution: Instagram (and sometimes TikTok) doesn't set a
+        # real `title` — yt-dlp returns "Video by <username>" as a
+        # placeholder. The actual caption lives in `description`. If the
+        # title looks like the placeholder, prefer the first line of the
+        # description.
+        title = (info.get('title') or '').strip()
+        description = (info.get('description') or '').strip()
+        looks_generic = (
+            not title
+            or title.lower().startswith('video by ')
+            or title.lower() == (info.get('uploader') or '').lower()
+        )
+        if looks_generic and description:
+            # First non-empty line of the description, capped at 100 chars
+            # so a wall-of-text caption doesn't become the title.
+            first_line = next(
+                (line.strip() for line in description.splitlines() if line.strip()),
+                ''
+            )
+            if first_line:
+                title = first_line[:100]
+
         return jsonify({
-            'title': info.get('title') or '',
+            'title': title,
             'artist': artist,
             'duration': info.get('duration') or 0,
             'thumbnail_url': info.get('thumbnail') or '',
