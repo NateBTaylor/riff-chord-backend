@@ -51,13 +51,36 @@ def _youtube_cookies_path():
     content = os.environ.get('YOUTUBE_COOKIES_TXT')
     if not content:
         return None
+
+    # Normalize literal '\n' some env-var UIs paste in instead of newlines.
+    content = content.replace('\\n', '\n')
+
+    # Sanity-check: at least one line must look like a Netscape cookie
+    # row (7 tab-separated columns, domain starts with '.' or is bare).
+    # If the env var got polluted with a Python traceback or other junk,
+    # log a loud error rather than silently writing garbage that yt-dlp
+    # will reject one line at a time.
+    looks_valid = False
+    for line in content.splitlines()[:60]:
+        s = line.strip()
+        if not s or s.startswith('#'):
+            continue
+        cols = s.split('\t')
+        if len(cols) >= 7 and (cols[0].startswith('.') or '.' in cols[0]):
+            looks_valid = True
+            break
+
+    if not looks_valid:
+        log_error(
+            "[YouTube] YOUTUBE_COOKIES_TXT doesn't look like Netscape cookies. "
+            f"First 160 chars: {content[:160]!r}"
+        )
+        return None
+
     path = '/tmp/youtube_cookies.txt'
-    # Rewrite every call so a Railway env var change is picked up without
-    # a process restart. File is small (~10-20KB), I/O is cheap.
     try:
-        # Normalize literal '\n' that some UIs paste in instead of newlines.
         with open(path, 'w') as f:
-            f.write(content.replace('\\n', '\n'))
+            f.write(content)
         return path
     except Exception:
         return None
