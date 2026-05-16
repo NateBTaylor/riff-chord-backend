@@ -74,6 +74,17 @@ def extract_audio():
             'extract_flat': False,
             'noplaylist': True,
             'socket_timeout': 30,
+            # YouTube tightened bot detection ("Sign in to confirm you're
+            # not a bot"). bgutil-ytdlp-pot-provider auto-supplies PoT
+            # tokens for clients that benefit from them — but only if we
+            # explicitly ask for those clients. web_safari is the most
+            # reliable PoT-friendly client; mweb / tv_embedded are
+            # fallbacks for cases where web_safari fails server-side.
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['web_safari', 'mweb', 'tv_embedded'],
+                },
+            },
             'http_headers': {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
                 'Accept-Language': 'en-US,en;q=0.9',
@@ -117,6 +128,11 @@ def extract_audio():
                     'connection reset',
                     'timed out',
                     'temporary failure',
+                    # YouTube bot-detection: the PoT provider sometimes
+                    # needs a second attempt to fetch a fresh token.
+                    "sign in to confirm",
+                    'confirm you',
+                    "you're not a bot",
                 ))
                 if not transient or attempt == 2:
                     raise
@@ -206,6 +222,14 @@ def fetch_metadata():
             'skip_download': True,
             'noplaylist': True,
             'socket_timeout': 15,
+            # Same PoT-friendly client config as extract_audio. Without it
+            # YouTube returns "Sign in to confirm you're not a bot" and
+            # the iOS confirmation sheet shows no title/thumbnail prefill.
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['web_safari', 'mweb', 'tv_embedded'],
+                },
+            },
             'http_headers': {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
                 'Accept-Language': 'en-US,en;q=0.9',
@@ -214,6 +238,8 @@ def fetch_metadata():
 
         # Retry transient network errors so the iOS confirmation sheet's
         # title/artist/thumbnail prefill survives a flaky TikTok request.
+        # Also retry on bot-detection errors — the PoT plugin sometimes
+        # needs a second attempt to mint a fresh token.
         import time as _time
         info = None
         for attempt in range(3):
@@ -229,6 +255,11 @@ def fetch_metadata():
                     'connection reset',
                     'timed out',
                     'temporary failure',
+                    # YouTube bot-detection: the PoT provider sometimes
+                    # needs a second attempt to fetch a fresh token.
+                    "sign in to confirm",
+                    'confirm you',
+                    "you're not a bot",
                 ))
                 if not transient or attempt == 2:
                     raise
