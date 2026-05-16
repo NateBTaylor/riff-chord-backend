@@ -92,14 +92,14 @@ def extract_audio():
     tmpdir = tempfile.mkdtemp(prefix='riff_yt_')
     output_template = os.path.join(tmpdir, f'{uuid.uuid4().hex}.%(ext)s')
 
-    # Fast path: for YouTube URLs, route through public Piped instances
-    # first. They handle the bot-detection-blocked youtube extraction on
-    # their side and hand us a fresh stream URL we can fetch directly.
-    # Falls through to yt-dlp if every Piped instance is down or blocked.
+    # For YouTube URLs, only fall back to Piped when we don't have
+    # cookies configured. Cookies + yt-dlp is faster and more reliable
+    # than the public Piped instance chain (which has been mostly down).
     yt_host = (urlparse(url).hostname or '').lower()
     is_youtube = yt_host in {'youtube.com', 'www.youtube.com',
                               'm.youtube.com', 'youtu.be'}
-    if is_youtube:
+    cookies_configured = bool(os.environ.get('YOUTUBE_COOKIES_TXT'))
+    if is_youtube and not cookies_configured:
         try:
             from services.youtube_piped import download_audio as piped_download
             piped_path = piped_download(url, tmpdir)
@@ -130,19 +130,20 @@ def extract_audio():
     try:
         import yt_dlp
 
+        # Format selector: loosened to "any audio, else any best stream".
+        # The previous m4a-preferring expression returned no matches with
+        # the PoT-friendly player clients, which is what was causing the
+        # "Requested format is not available" error. The
+        # FFmpegExtractAudio postprocessor below transcodes whatever we
+        # get to m4a anyway.
         ydl_opts = {
-            'format': 'bestaudio[ext=m4a]/bestaudio[ext=mp4]/bestaudio/best',
+            'format': 'bestaudio/best',
             'outtmpl': output_template,
             'quiet': True,
             'no_warnings': True,
             'extract_flat': False,
             'noplaylist': True,
             'socket_timeout': 30,
-            'extractor_args': {
-                'youtube': {
-                    'player_client': ['web_safari', 'mweb', 'tv_embedded'],
-                },
-            },
             'http_headers': {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
                 'Accept-Language': 'en-US,en;q=0.9',
@@ -154,15 +155,20 @@ def extract_audio():
             }],
         }
 
-        # Auth via signed-in YouTube cookies (set YOUTUBE_COOKIES_TXT in
-        # Railway). With cookies present, yt-dlp's requests look like a
-        # normal logged-in user and YouTube's bot detection lets them
-        # through. Without cookies the call falls back to the (failing)
-        # unauthenticated path.
         cookies_path = _youtube_cookies_path()
         if cookies_path:
             ydl_opts['cookiefile'] = cookies_path
             log_info("[YouTube] Using YOUTUBE_COOKIES_TXT for yt-dlp auth")
+        else:
+            # No cookies — restrict to PoT-friendly clients so the
+            # bgutil-pot plugin can mint a token. With cookies the default
+            # web client returns more formats, so we omit this restriction
+            # when authenticated.
+            ydl_opts['extractor_args'] = {
+                'youtube': {
+                    'player_client': ['web_safari', 'mweb', 'tv_embedded'],
+                },
+            }
 
         thumbnail_url = ''
         canonical_url = ''
