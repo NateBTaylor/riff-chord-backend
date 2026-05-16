@@ -35,6 +35,34 @@ def _is_supported_url(url: str) -> bool:
     return any(re.match(p, url) for p in _SUPPORTED_URL_PATTERNS)
 
 
+def _youtube_cookies_path():
+    """Materialize the YOUTUBE_COOKIES_TXT env var into a Netscape-format
+    cookies.txt file at /tmp/youtube_cookies.txt and return the path.
+
+    YouTube's bot detection is bypassed when yt-dlp sends a signed-in
+    user's cookies — those requests look like normal browser traffic.
+    Cookies typically last 2-8 weeks before YouTube invalidates them;
+    when that happens, re-export from your browser and update the env
+    var in Railway.
+
+    Returns None if no env var is set. Callers should silently skip
+    the cookies path when None is returned.
+    """
+    content = os.environ.get('YOUTUBE_COOKIES_TXT')
+    if not content:
+        return None
+    path = '/tmp/youtube_cookies.txt'
+    # Rewrite every call so a Railway env var change is picked up without
+    # a process restart. File is small (~10-20KB), I/O is cheap.
+    try:
+        # Normalize literal '\n' that some UIs paste in instead of newlines.
+        with open(path, 'w') as f:
+            f.write(content.replace('\\n', '\n'))
+        return path
+    except Exception:
+        return None
+
+
 @youtube_bp.route('/audio', methods=['POST'])
 @limiter.limit(config.get_rate_limit('heavy_processing'))
 def extract_audio():
@@ -110,12 +138,6 @@ def extract_audio():
             'extract_flat': False,
             'noplaylist': True,
             'socket_timeout': 30,
-            # YouTube tightened bot detection ("Sign in to confirm you're
-            # not a bot"). bgutil-ytdlp-pot-provider auto-supplies PoT
-            # tokens for clients that benefit from them — but only if we
-            # explicitly ask for those clients. web_safari is the most
-            # reliable PoT-friendly client; mweb / tv_embedded are
-            # fallbacks for cases where web_safari fails server-side.
             'extractor_args': {
                 'youtube': {
                     'player_client': ['web_safari', 'mweb', 'tv_embedded'],
@@ -131,6 +153,16 @@ def extract_audio():
                 'preferredquality': '128',
             }],
         }
+
+        # Auth via signed-in YouTube cookies (set YOUTUBE_COOKIES_TXT in
+        # Railway). With cookies present, yt-dlp's requests look like a
+        # normal logged-in user and YouTube's bot detection lets them
+        # through. Without cookies the call falls back to the (failing)
+        # unauthenticated path.
+        cookies_path = _youtube_cookies_path()
+        if cookies_path:
+            ydl_opts['cookiefile'] = cookies_path
+            log_info("[YouTube] Using YOUTUBE_COOKIES_TXT for yt-dlp auth")
 
         thumbnail_url = ''
         canonical_url = ''
@@ -297,6 +329,13 @@ def fetch_metadata():
                 'Accept-Language': 'en-US,en;q=0.9',
             },
         }
+
+        # Same cookies env var as extract_audio. YouTube metadata uses
+        # the oEmbed fast-path above so cookies are rarely needed here,
+        # but if oEmbed falls through cookies make the yt-dlp retry work.
+        cookies_path = _youtube_cookies_path()
+        if cookies_path:
+            ydl_opts['cookiefile'] = cookies_path
 
         # Retry transient network errors so the iOS confirmation sheet's
         # title/artist/thumbnail prefill survives a flaky TikTok request.
