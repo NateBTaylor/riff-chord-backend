@@ -159,11 +159,19 @@ def extract_audio():
         if cookies_path:
             ydl_opts['cookiefile'] = cookies_path
             log_info("[YouTube] Using YOUTUBE_COOKIES_TXT for yt-dlp auth")
+            # Even with cookies, the default `web` client requires PoT
+            # tokens to return formats — and bgutil-pot has been flaky.
+            # ios/android clients return direct audio URLs without any
+            # PoT / signature cipher dependency, and they accept cookies
+            # fine. tv_embedded is a final fallback.
+            ydl_opts['extractor_args'] = {
+                'youtube': {
+                    'player_client': ['ios', 'android', 'tv_embedded'],
+                },
+            }
         else:
             # No cookies — restrict to PoT-friendly clients so the
-            # bgutil-pot plugin can mint a token. With cookies the default
-            # web client returns more formats, so we omit this restriction
-            # when authenticated.
+            # bgutil-pot plugin can mint a token.
             ydl_opts['extractor_args'] = {
                 'youtube': {
                     'player_client': ['web_safari', 'mweb', 'tv_embedded'],
