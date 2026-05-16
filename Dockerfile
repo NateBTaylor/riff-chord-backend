@@ -27,6 +27,12 @@ RUN pip install --no-cache-dir git+https://github.com/CPJKU/madmom
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Install the bgutil PoT server (npm package) — the bgutil-ytdlp-pot-provider
+# pip plugin talks to this server over HTTP at 127.0.0.1:4416 to generate
+# Proof-of-Origin tokens. Without it, YouTube returns only thumbnail/image
+# formats for anonymous + authenticated requests alike.
+RUN npm install -g bgutil-ytdlp-pot-provider
+
 # Remove build tools to save space
 RUN apt-get purge -y build-essential git pkg-config && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/* /root/.cache/pip
@@ -39,6 +45,8 @@ COPY blueprints/ blueprints/
 COPY models/ models/
 COPY utils/ utils/
 COPY compat/ compat/
+COPY start.sh ./
+RUN chmod +x /app/start.sh
 RUN rm -f /app/scipy_patch.py || true
 
 # Non-root user
@@ -55,4 +63,5 @@ ENV FLASK_ENV=production
 ENV FLASK_DEBUG=False
 ENV PYTHONUNBUFFERED=1
 
-CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "1", "--threads", "4", "--timeout", "600", "--worker-class", "gthread", "--preload", "app:app"]
+# Launch bgutil PoT server + Gunicorn together via start.sh
+CMD ["/app/start.sh"]
