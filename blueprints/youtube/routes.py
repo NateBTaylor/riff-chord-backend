@@ -169,26 +169,38 @@ def extract_audio():
         info = None
         chosen_client = None
         for client in client_configs:
-            probe_opts = {**base_opts, 'extractor_args': {
-                'youtube': {'player_client': [client]},
-            }}
+            # process=False bypasses yt-dlp's format selector entirely.
+            # That selector was raising "Requested format is not available"
+            # during the probe phase, masking whether formats actually
+            # existed at all. With process=False we get the raw extractor
+            # output, no selector applied.
+            probe_opts = {**base_opts,
+                          'extractor_args': {'youtube': {'player_client': [client]}}}
             try:
                 with yt_dlp.YoutubeDL(probe_opts) as ydl:
-                    probe = ydl.extract_info(url, download=False)
+                    probe = ydl.extract_info(url, download=False, process=False)
                 formats = probe.get('formats') or []
                 audio_formats = [
                     f for f in formats
                     if (f.get('acodec') and f.get('acodec') != 'none')
                     and f.get('url')
                 ]
+                # Dump first 3 format IDs + extras so we can see if formats
+                # are present but unsuitable, vs totally absent.
+                summary = ", ".join(
+                    f"{f.get('format_id')}({f.get('ext')},{f.get('acodec') or '-'}/"
+                    f"{f.get('vcodec') or '-'})"
+                    for f in formats[:5]
+                )
                 log_info(f"[YouTube] client={client} → "
-                         f"{len(formats)} formats, {len(audio_formats)} usable audio")
+                         f"{len(formats)} formats ({len(audio_formats)} usable audio): "
+                         f"[{summary}]")
                 if audio_formats:
                     info = probe
                     chosen_client = client
                     break
             except Exception as e:
-                log_info(f"[YouTube] client={client} probe failed: {str(e)[:200]}")
+                log_info(f"[YouTube] client={client} probe failed: {str(e)[:250]}")
                 continue
 
         if not info:
