@@ -212,8 +212,27 @@ def fetch_metadata():
             },
         }
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+        # Retry transient network errors so the iOS confirmation sheet's
+        # title/artist/thumbnail prefill survives a flaky TikTok request.
+        import time as _time
+        info = None
+        for attempt in range(3):
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                break
+            except Exception as e:
+                error_str = str(e).lower()
+                transient = any(token in error_str for token in (
+                    'connection aborted',
+                    'remotedisconnected',
+                    'connection reset',
+                    'timed out',
+                    'temporary failure',
+                ))
+                if not transient or attempt == 2:
+                    raise
+                _time.sleep(0.5 * (2 ** attempt))  # 0.5s, 1s
 
         # uploader / creator naming differs by platform — try the most
         # specific fields first.
