@@ -1,10 +1,34 @@
 import os
 import sys
 import numpy as np
-import torch
 import librosa
 from pathlib import Path
 import soundfile as sf
+
+# torch is ~300MB resident once imported, and it is ONLY needed when the
+# Beat-Transformer model actually runs. On this deployment beat detection
+# defaults to librosa and the Transformer path is unused, so importing torch
+# at module load just pins that memory for the life of the process (and the
+# Railway bill is metered on GB-minutes). Defer it: bind `torch` to a lazy
+# proxy that imports the real package on first attribute access and then
+# swaps itself out. Every torch.* reference below is inside a method, so
+# nothing triggers the import until a Beat-Transformer method is invoked.
+import importlib as _importlib
+
+
+class _LazyTorch:
+    """Imports `torch` on first attribute access, then replaces the module
+    global so subsequent lookups hit the real package directly."""
+    _mod = None
+
+    def __getattr__(self, name):
+        if _LazyTorch._mod is None:
+            _LazyTorch._mod = _importlib.import_module("torch")
+            globals()["torch"] = _LazyTorch._mod
+        return getattr(_LazyTorch._mod, name)
+
+
+torch = _LazyTorch()
 
 # Performance optimization: Conditional debug logging
 # Only enable verbose logging in development mode
@@ -184,13 +208,6 @@ class BeatTransformerHandler:
                 "bpm": 0
             }
 
-# Import the model with proper path
-import sys
-import os
-beat_transformer_path = os.path.join(os.path.dirname(__file__), "Beat-Transformer", "code")
-sys.path.append(beat_transformer_path)
-from DilatedTransformer import Demixed_DilatedTransformerModel
-
 def is_beat_transformer_available():
     """
     Check if Beat Transformer is available for use.
@@ -200,8 +217,15 @@ def is_beat_transformer_available():
         bool: True if Beat Transformer can be used, False otherwise
     """
     try:
-        # Check if PyTorch is available
-        import torch
+        import importlib.util
+
+        # Probe for PyTorch WITHOUT importing it. find_spec only locates the
+        # package; it never executes/initializes torch (which would pin ~300MB
+        # of RAM for the life of the process). The real import is deferred to
+        # actual Beat-Transformer inference, so the default librosa path never
+        # pays for torch just to answer this availability check.
+        if importlib.util.find_spec("torch") is None:
+            return False
 
         # Check if the model checkpoint exists
         BEAT_TRANSFORMER_DIR = Path(__file__).parent / "Beat-Transformer"
@@ -212,12 +236,15 @@ def is_beat_transformer_available():
                 print(f"Beat Transformer checkpoint not found: {checkpoint_path}")
             return False
 
-        # Check if we can import the model
+        # Confirm the model definition module is importable, again without
+        # executing it — find_spec doesn't run the module body, so torch
+        # (which DilatedTransformer imports) stays unloaded here.
         beat_transformer_path = os.path.join(os.path.dirname(__file__), "Beat-Transformer", "code")
         if beat_transformer_path not in sys.path:
             sys.path.append(beat_transformer_path)
 
-        from DilatedTransformer import Demixed_DilatedTransformerModel
+        if importlib.util.find_spec("DilatedTransformer") is None:
+            return False
 
         if DEBUG:
             print("Beat Transformer is available")
@@ -309,6 +336,15 @@ class BeatTransformerDetector:
         # Default to fold 4 if no checkpoint specified
         if checkpoint_path is None:
             checkpoint_path = str(BEAT_TRANSFORMER_DIR / "checkpoint" / "fold_4_trf_param.pt")
+
+        # Import the model definition lazily — DilatedTransformer pulls in
+        # torch at module load, so deferring it to here (only reached when a
+        # detector is actually constructed) keeps torch out of RAM on the
+        # default librosa path. Ensure the model code dir is on sys.path first.
+        beat_transformer_path = os.path.join(os.path.dirname(__file__), "Beat-Transformer", "code")
+        if beat_transformer_path not in sys.path:
+            sys.path.append(beat_transformer_path)
+        from DilatedTransformer import Demixed_DilatedTransformerModel
 
         # Initialize model
         self.model = Demixed_DilatedTransformerModel(
