@@ -1,34 +1,39 @@
 import os
 import sys
 import numpy as np
-import librosa
 from pathlib import Path
-import soundfile as sf
 
-# torch is ~300MB resident once imported, and it is ONLY needed when the
-# Beat-Transformer model actually runs. On this deployment beat detection
-# defaults to librosa and the Transformer path is unused, so importing torch
-# at module load just pins that memory for the life of the process (and the
-# Railway bill is metered on GB-minutes). Defer it: bind `torch` to a lazy
-# proxy that imports the real package on first attribute access and then
-# swaps itself out. Every torch.* reference below is inside a method, so
-# nothing triggers the import until a Beat-Transformer method is invoked.
+# torch (~300MB resident) and librosa (which drags in numba + scipy, another
+# ~150MB+) are ONLY needed when the Beat-Transformer model actually runs. On
+# this deployment the analyze pipeline goes through Modal by default, and the
+# local fallback uses LibrosaDetectorService (which imports librosa on its
+# own), so this module's heavy deps never need to load at boot. Railway meters
+# memory by GB-minute, so importing them eagerly just pins RAM for the life of
+# the process. Defer them: bind each name to a lazy proxy that imports the real
+# package on first attribute access and then swaps itself out. Every librosa.*
+# and torch.* reference below is inside a method, so nothing triggers the
+# import until a Beat-Transformer method is actually invoked.
 import importlib as _importlib
 
 
-class _LazyTorch:
-    """Imports `torch` on first attribute access, then replaces the module
-    global so subsequent lookups hit the real package directly."""
-    _mod = None
+class _LazyModule:
+    """Imports the named module on first attribute access, then replaces the
+    matching module global so subsequent lookups hit the real package
+    directly."""
 
-    def __getattr__(self, name):
-        if _LazyTorch._mod is None:
-            _LazyTorch._mod = _importlib.import_module("torch")
-            globals()["torch"] = _LazyTorch._mod
-        return getattr(_LazyTorch._mod, name)
+    def __init__(self, name):
+        self._name = name
+        self._mod = None
+
+    def __getattr__(self, attr):
+        if self._mod is None:
+            self._mod = _importlib.import_module(self._name)
+            globals()[self._name] = self._mod
+        return getattr(self._mod, attr)
 
 
-torch = _LazyTorch()
+torch = _LazyModule("torch")
+librosa = _LazyModule("librosa")
 
 # Performance optimization: Conditional debug logging
 # Only enable verbose logging in development mode
