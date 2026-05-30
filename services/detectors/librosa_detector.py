@@ -78,6 +78,13 @@ class LibrosaDetectorService:
         try:
             log_info(f"Running librosa detection on: {file_path}")
 
+            # Apply the librosa/scipy beat-tracking compat patches before using
+            # librosa. These used to run at boot, but that imported librosa
+            # (~150MB with numba+scipy) into every process even though beats
+            # default to Modal. Deferring them here keeps that memory off the
+            # boot/idle footprint; idempotent, so the cost is paid once.
+            import compat
+            compat.apply_librosa_patches()
             import librosa
 
             # Load audio at 22050Hz mono (standard for beat detection, ~4x less
